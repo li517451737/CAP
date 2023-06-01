@@ -13,7 +13,7 @@ services.AddCap(config=>
 
 If you don't want to use Microsoft's IoC container, you can take a look at ASP.NET Core documentation [here](https://docs.microsoft.com/en-us/aspnet/core/fundamentals/dependency-injection?view=aspnetcore-2.2#default-service-container-replacement) to learn how to replace the default container implementation.
 
-## what is minimum configuration required for CAP
+## What is minimum configuration required for CAP
 
 you have to configure at least a transport and a storage. If you want to get started quickly you can use the following configuration:
 
@@ -85,6 +85,15 @@ During the message sending process if consumption method fails, CAP will try to 
     By default if failure occurs on send or consume, retry will start after **4 minutes** in order to avoid possible problems caused by setting message state delays.    
     Failures in the process of sending and consuming messages will be retried 3 times immediately, and will be retried polling after 3 times, at which point the FailedRetryInterval configuration will take effect.
 
+!!! WARNING "Multi-instance concurrent retries"
+    We introduced database-based distributed locks in version 7.1.0 to solve the problem of retrying concurrent fetches from the database under multiple instances, you need to explicitly configure `UseStorageLock` to true.
+
+#### UseStorageLock
+
+> Default: false
+
+If set to true, we will use a database-based distributed lock to solve the problem of concurrent fetches data by retry processes with multiple instances. This will generate the cap.lock table in the database.
+
 #### CollectorCleaningInterval
 
 > Default: 300 sec
@@ -128,3 +137,15 @@ The expiration time (in seconds) of the failed message. When the message is sent
 > Default: false
 
 If `true` then all consumers within the same group pushes received messages to own dispatching pipeline channel. Each channel has set thread count to `ConsumerThreadCount` value.
+
+!!! WARNING "If option set true, the EnableConsumerPrefetch option is disabled"
+
+#### EnableConsumerPrefetch
+
+> Default: false， Before version 7.0 the default behavior is true
+
+By default, CAP will only read one message from the message queue, then execute the subscription method. After the execution is done, it will read the next message for execution.
+If set to true, the consumer will prefetch some messages to the memory queue, and then distribute them to the scheduler for execution.
+
+!!! note "Precautions"
+    Setting it to true may cause some problems. When the subscription method executes too slowly and takes too long, it will cause the retry thread to pick up messages that have not yet been executed. The retry thread picks up messages from 4 minutes ago by default, that is to say, if the message backlog of more than 4 minutes on the consumer side will be picked up again and executed again

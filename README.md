@@ -1,9 +1,9 @@
 <p align="center">
-  <img height="140" src="https://cap.dotnetcore.xyz/img/logo.svg">
+  <img height="140" src="https://raw.githubusercontent.com/dotnetcore/CAP/master/docs/content/img/logo.svg">
 </p>
 
 # CAP 　　　　　　　　　　　　　　　　　　　　[中文](https://github.com/dotnetcore/CAP/blob/master/README.zh-cn.md)
-[![Travis branch](https://img.shields.io/travis/dotnetcore/CAP/master.svg?label=travis-ci)](https://travis-ci.org/dotnetcore/CAP)
+[![Docs&Dahsboard](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashbaord.yml/badge.svg?branch=master)](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashbaord.yml)
 [![AppVeyor](https://ci.appveyor.com/api/projects/status/v8gfh6pe2u2laqoa/branch/master?svg=true)](https://ci.appveyor.com/project/yang-xiaodong/cap/branch/master)
 [![NuGet](https://img.shields.io/nuget/v/DotNetCore.CAP.svg)](https://www.nuget.org/packages/DotNetCore.CAP/)
 [![NuGet Preview](https://img.shields.io/nuget/vpre/DotNetCore.CAP.svg?label=nuget-pre)](https://www.nuget.org/packages/DotNetCore.CAP/)
@@ -18,7 +18,7 @@ You can also use CAP as an EventBus. CAP provides a simpler way to implement eve
 
 ## Architecture overview
 
-![cap.png](https://cap.dotnetcore.xyz/img/architecture-new.png)
+![cap.png](https://raw.githubusercontent.com/dotnetcore/CAP/master/docs/content/img/architecture-new.png)
 
 > CAP implements the Outbox Pattern described in the [eShop ebook](https://docs.microsoft.com/en-us/dotnet/standard/microservices-architecture/multi-container-microservice-net-applications/subscribe-events#designing-atomicity-and-resiliency-when-publishing-to-the-event-bus).
 
@@ -81,7 +81,7 @@ public void ConfigureServices(IServiceCollection services)
         x.UseMongoDB("Your ConnectionStrings");  //MongoDB 4.0+ cluster
 
         // CAP support RabbitMQ,Kafka,AzureService as the MQ, choose to add configuration you needed：
-        x.UseRabbitMQ("ConnectionString");
+        x.UseRabbitMQ("HostName");
         x.UseKafka("ConnectionString");
         x.UseAzureServiceBus("ConnectionString");
         x.UseAmazonSQS();
@@ -92,7 +92,9 @@ public void ConfigureServices(IServiceCollection services)
 
 ### Publish
 
-Inject `ICapPublisher` in your Controller, then use the `ICapPublisher` to send messages
+Inject `ICapPublisher` in your Controller, then use the `ICapPublisher` to send messages.
+
+> The version 7.0+ supports publish delay messages.
 
 ```c#
 public class PublishController : Controller
@@ -114,6 +116,9 @@ public class PublishController : Controller
                 //your business logic code
 
                 _capBus.Publish("xxx.services.show.time", DateTime.Now);
+
+                // Publish delay message
+                _capBus.PublishDelayAsync(TimeSpan.FromSeconds(delaySeconds), "xxx.services.show.time", DateTime.Now);
             }
         }
 
@@ -243,7 +248,7 @@ public void ShowTime2(DateTime datetime)
 
 ```
 `ShowTime1` and `ShowTime2` will be called one after another because all received messages are processed linear.
-You can change that behaviour increasing `ConsumerThreadCount`.
+You can change that behaviour to set `UseDispatchingPerGroup` true.
 
 BTW, You can specify the default group name in the configuration:
 
@@ -280,8 +285,8 @@ services.AddCap(x =>
         d.DiscoveryServerPort = 8500;
         d.CurrentNodeHostName = "localhost";
         d.CurrentNodePort = 5800;
-        d.NodeId = 1;
-        d.NodeName = "CAP No.1 Node";
+        d.NodeId = "instance-id";
+        d.NodeName = "Catalog";
     });
 });
 ```

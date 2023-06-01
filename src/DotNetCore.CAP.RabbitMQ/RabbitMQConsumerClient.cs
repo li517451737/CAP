@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using DotNetCore.CAP.Messages;
 using DotNetCore.CAP.Transport;
 using Microsoft.Extensions.Options;
@@ -34,9 +35,9 @@ namespace DotNetCore.CAP.RabbitMQ
             _exchangeName = connectionChannelPool.Exchange;
         }
 
-        public event EventHandler<TransportMessage>? OnMessageReceived;
+        public Func<TransportMessage, object?, Task>? OnMessageCallback { get; set; }
 
-        public event EventHandler<LogMessageEventArgs>? OnLog;
+        public Action<LogMessageEventArgs>? OnLogCallback { get; set; }
 
         public BrokerAddress BrokerAddress => new("RabbitMQ", $"{_rabbitMQOptions.HostName}:{_rabbitMQOptions.Port}");
 
@@ -59,12 +60,15 @@ namespace DotNetCore.CAP.RabbitMQ
         {
             Connect();
 
-            var consumer = new EventingBasicConsumer(_channel);
+            var consumer = new AsyncEventingBasicConsumer(_channel);
             consumer.Received += OnConsumerReceived;
             consumer.Shutdown += OnConsumerShutdown;
             consumer.Registered += OnConsumerRegistered;
             consumer.Unregistered += OnConsumerUnregistered;
             consumer.ConsumerCancelled += OnConsumerConsumerCancelled;
+
+            if (_rabbitMQOptions.BasicQosOptions != null)
+                _channel?.BasicQos(0, _rabbitMQOptions.BasicQosOptions.PrefetchCount, _rabbitMQOptions.BasicQosOptions.Global);
 
             _channel.BasicConsume(_queueName, false, consumer);
 
@@ -77,11 +81,11 @@ namespace DotNetCore.CAP.RabbitMQ
             // ReSharper disable once FunctionNeverReturns
         }
 
-        public void Commit(object sender)
+        public void Commit(object? sender)
         {
             if (_channel!.IsOpen)
             {
-                _channel.BasicAck((ulong)sender, false);
+                _channel.BasicAck((ulong)sender!, false);
             }
         }
 
@@ -122,6 +126,11 @@ namespace DotNetCore.CAP.RabbitMQ
                         arguments.Add("x-queue-mode", _rabbitMQOptions.QueueArguments.QueueMode);
                     }
 
+                    if (!string.IsNullOrEmpty(_rabbitMQOptions.QueueArguments.QueueType))
+                    {
+                        arguments.Add("x-queue-type", _rabbitMQOptions.QueueArguments.QueueType);
+                    }
+
                     _channel.QueueDeclare(_queueName, durable: true, exclusive: false, autoDelete: false, arguments: arguments);
                 }
             }
@@ -129,37 +138,46 @@ namespace DotNetCore.CAP.RabbitMQ
 
         #region events
 
-        private void OnConsumerConsumerCancelled(object sender, ConsumerEventArgs e)
+        private Task OnConsumerConsumerCancelled(object? sender, ConsumerEventArgs e)
         {
             var args = new LogMessageEventArgs
             {
                 LogType = MqLogType.ConsumerCancelled,
                 Reason = string.Join(",", e.ConsumerTags)
             };
-            OnLog?.Invoke(sender, args);
+
+            OnLogCallback!(args);
+
+            return Task.CompletedTask;
         }
 
-        private void OnConsumerUnregistered(object sender, ConsumerEventArgs e)
+        private Task OnConsumerUnregistered(object? sender, ConsumerEventArgs e)
         {
             var args = new LogMessageEventArgs
             {
                 LogType = MqLogType.ConsumerUnregistered,
                 Reason = string.Join(",", e.ConsumerTags)
             };
-            OnLog?.Invoke(sender, args);
+
+            OnLogCallback!(args);
+
+            return Task.CompletedTask;
         }
 
-        private void OnConsumerRegistered(object sender, ConsumerEventArgs e)
+        private Task OnConsumerRegistered(object? sender, ConsumerEventArgs e)
         {
             var args = new LogMessageEventArgs
             {
                 LogType = MqLogType.ConsumerRegistered,
                 Reason = string.Join(",", e.ConsumerTags)
             };
-            OnLog?.Invoke(sender, args);
+
+            OnLogCallback!(args);
+
+            return Task.CompletedTask;
         }
 
-        private void OnConsumerReceived(object sender, BasicDeliverEventArgs e)
+        private async Task OnConsumerReceived(object? sender, BasicDeliverEventArgs e)
         {
             var headers = new Dictionary<string, string?>();
 
@@ -191,10 +209,10 @@ namespace DotNetCore.CAP.RabbitMQ
 
             var message = new TransportMessage(headers, e.Body.ToArray());
 
-            OnMessageReceived?.Invoke(e.DeliveryTag, message);
+            await OnMessageCallback!(message, e.DeliveryTag);
         }
 
-        private void OnConsumerShutdown(object sender, ShutdownEventArgs e)
+        private Task OnConsumerShutdown(object? sender, ShutdownEventArgs e)
         {
             var args = new LogMessageEventArgs
             {
@@ -202,7 +220,9 @@ namespace DotNetCore.CAP.RabbitMQ
                 Reason = e.ReplyText
             };
 
-            OnLog?.Invoke(sender, args);
+            OnLogCallback!(args);
+
+            return Task.CompletedTask;
         }
 
         #endregion

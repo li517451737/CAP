@@ -1,9 +1,9 @@
 <p align="center">
-  <img height="140" src="https://cap.dotnetcore.xyz/img/logo.svg">
+  <img height="140" src="https://raw.githubusercontent.com/dotnetcore/CAP/master/docs/content/img/logo.svg">
 </p>
 
 # CAP 　　　　　　　　　　　　　　　　　　　　[English](https://github.com/dotnetcore/CAP/blob/master/README.md)
-[![Travis branch](https://img.shields.io/travis/dotnetcore/CAP/develop.svg?label=travis-ci)](https://travis-ci.org/dotnetcore/CAP)
+[![Docs&Dahsboard](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashbaord.yml/badge.svg?branch=master)](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashbaord.yml)
 [![AppVeyor](https://ci.appveyor.com/api/projects/status/v8gfh6pe2u2laqoa?svg=true)](https://ci.appveyor.com/project/yang-xiaodong/cap)
 [![NuGet](https://img.shields.io/nuget/v/DotNetCore.CAP.svg)](https://www.nuget.org/packages/DotNetCore.CAP/)
 [![NuGet Preview](https://img.shields.io/nuget/vpre/DotNetCore.CAP.svg?label=nuget-pre)](https://www.nuget.org/packages/DotNetCore.CAP/)
@@ -25,7 +25,7 @@ CAP 采用的是和当前数据库集成的本地消息表的方案来解决在�
 
 ## 架构预览
 
-![architecture.png](https://cap.dotnetcore.xyz/img/architecture-new.png)
+![architecture.png](https://raw.githubusercontent.com/dotnetcore/CAP/master/docs/content/img/architecture-new.png)
 
 > CAP 实现了 [eShop 电子书](https://docs.microsoft.com/en-us/dotnet/standard/microservices-architecture/multi-container-microservice-net-applications/subscribe-events#designing-atomicity-and-resiliency-when-publishing-to-the-event-bus) 中描述的发件箱模式
 
@@ -97,7 +97,9 @@ public void ConfigureServices(IServiceCollection services)
 
 ### 发布
 
-在 Controller 中注入 `ICapPublisher` 然后使用 `ICapPublisher` 进行消息发送
+在 Controller 中注入 `ICapPublisher` 然后使用 `ICapPublisher` 进行消息发送。
+
+> 版本 7.0+ 支持发送延迟消息。
 
 ```c#
 
@@ -115,6 +117,9 @@ public class PublishController : Controller
     public IActionResult WithoutTransaction()
     {
         _capBus.Publish("xxx.services.show.time", DateTime.Now);
+
+        // Publish delay message
+        _capBus.PublishDelayAsync(TimeSpan.FromSeconds(delaySeconds), "xxx.services.show.time", DateTime.Now);
 	
         return Ok();
     }
@@ -204,6 +209,21 @@ public void ConfigureServices(IServiceCollection services)
 }
 ```
 
+#### 使用多部分订阅名
+
+要在类级别对订阅的Topic进行分组，您可以将在方法上的订阅设置为部分订阅。 消息队列上的订阅将是类上定义的topic加上方法上定义的topic的拼合。 
+在下面的示例中，当收到关于 `customers.create` 的消息时，将调用 `Create(..)` 函数
+
+```c#
+[CapSubscribe("customers")]
+public class CustomersSubscriberService : ICapSubscribe
+{
+    [CapSubscribe("create", isPartial: true)]
+    public void Create(Customer customer)
+    {
+    }
+}
+```
 
 #### 订阅者组
 
@@ -227,7 +247,8 @@ public void ShowTime2(DateTime datetime)
 }
 
 ```
-`ShowTime1` 和 `ShowTime2` 处于不同的组，他们将会被同时调用。
+
+`ShowTime1` 和 `ShowTime2` 处于不同的组，他们在默认情况下被线性的接连调用，你可以通过设置`UseDispatchingPerGroup`为true来使两者互不影响的同时调用。
 
 PS，你可以通过下面的方式来指定默认的消费者组名称：
 
@@ -266,21 +287,13 @@ services.AddCap(x =>
         d.DiscoveryServerPort = 8500;
         d.CurrentNodeHostName = "localhost";
         d.CurrentNodePort = 5800;
-        d.NodeId = 1;
-        d.NodeName = "CAP No.1 Node";
+        d.NodeId = "instance-id";
+        d.NodeName = "Catalog";
     });
 });
 ```
 
 仪表盘默认的访问地址是：[http://localhost:xxx/cap](http://localhost:xxx/cap)，你可以在`d.MatchPath`配置项中修改`cap`路径后缀为其他的名字。
-
-![dashboard](http://images2017.cnblogs.com/blog/250417/201710/250417-20171004220827302-189215107.png)
-
-![received](http://images2017.cnblogs.com/blog/250417/201710/250417-20171004220934115-1107747665.png)
-
-![subscibers](http://images2017.cnblogs.com/blog/250417/201710/250417-20171004220949193-884674167.png)
-
-![nodes](http://images2017.cnblogs.com/blog/250417/201710/250417-20171004221001880-1162918362.png)
 
 ## 贡献
 

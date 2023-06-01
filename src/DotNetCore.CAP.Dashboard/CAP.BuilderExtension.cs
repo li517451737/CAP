@@ -2,20 +2,19 @@
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
 using System;
-using System.Reflection;
+using System.IO;
+using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using DotNetCore.CAP.Dashboard;
-using DotNetCore.CAP.Dashboard.GatewayProxy;
-using DotNetCore.CAP.Dashboard.NodeDiscovery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Internal;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
 
 // ReSharper disable once CheckNamespace
@@ -23,7 +22,9 @@ namespace DotNetCore.CAP
 {
     public static class CapBuilderExtension
     {
-        public static IApplicationBuilder UseCapDashboard(this IApplicationBuilder app)
+        private const string EmbeddedFileNamespace = "DotNetCore.CAP.Dashboard.wwwroot.dist";
+
+        internal static IApplicationBuilder UseCapDashboard(this IApplicationBuilder app)
         {
             if (app == null)
             {
@@ -33,98 +34,49 @@ namespace DotNetCore.CAP
             var provider = app.ApplicationServices;
 
             var options = provider.GetService<DashboardOptions>();
+
             if (options != null)
             {
-                if (provider.GetService<DiscoveryOptions>() != null)
+                app.UseStaticFiles(new StaticFileOptions()
                 {
-                    app.UseMiddleware<GatewayProxyMiddleware>();
-                }
-
-                app.UseMiddleware<UiMiddleware>();
-
-                app.Map(options.PathMatch + "/api", false, x =>
-                {
-
-                    IAuthorizationService authService = null;
-                    if (!String.IsNullOrEmpty(options.AuthorizationPolicy))
-                    {
-                        authService = app.ApplicationServices.GetService<IAuthorizationService>();
-                    }
-
-                    var builder = new RouteBuilder(x);
-
-                    var methods = typeof(RouteActionProvider).GetMethods(BindingFlags.Instance | BindingFlags.Public);
-
-                    foreach (var method in methods)
-                    {
-                        var executor = ObjectMethodExecutor.Create(method, typeof(RouteActionProvider).GetTypeInfo());
-
-                        var getAttr = method.GetCustomAttribute<HttpGetAttribute>();
-                        if (getAttr != null)
-                        {
-
-                            builder.MapGet(getAttr.Template, async (request, response, data) =>
-                            {
-                                if (!await Authentication(request.HttpContext, options))
-                                {
-                                    response.StatusCode = StatusCodes.Status401Unauthorized;
-                                    return;
-                                }
-
-                                if (!await Authorize(request, response, options, authService))
-                                {
-                                    response.StatusCode = StatusCodes.Status401Unauthorized;
-                                    return;
-                                }
-
-                                var actionProvider = new RouteActionProvider(request, response, data);
-                                try
-                                {
-                                    await executor.ExecuteAsync(actionProvider, null);
-                                }
-                                catch (Exception ex)
-                                {
-                                    response.StatusCode = StatusCodes.Status500InternalServerError;
-                                    await response.WriteAsync(ex.Message);
-                                }
-                            });
-                        }
-
-                        var postAttr = method.GetCustomAttribute<HttpPostAttribute>();
-                        if (postAttr != null)
-                        {
-                            builder.MapPost(postAttr.Template, async (request, response, data) =>
-                            {
-                                if (!await Authentication(request.HttpContext, options))
-                                {
-                                    response.StatusCode = StatusCodes.Status401Unauthorized;
-                                    return;
-                                }
-
-                                if (!await Authorize(request, response, options, authService))
-                                {
-                                    response.StatusCode = StatusCodes.Status401Unauthorized;
-                                    return;
-                                }
-
-                                var actionProvider = new RouteActionProvider(request, response, data);
-                                try
-                                {
-                                    await executor.ExecuteAsync(actionProvider, null);
-                                }
-                                catch (Exception ex)
-                                {
-                                    response.StatusCode = StatusCodes.Status500InternalServerError;
-                                    await response.WriteAsync(ex.Message);
-                                }
-                            });
-                        }
-                    }
-
-                    var capRouter = builder.Build();
-
-                    x.UseRouter(capRouter);
+                    RequestPath = options.PathMatch,
+                    FileProvider = new EmbeddedFileProvider(options.GetType().Assembly, EmbeddedFileNamespace)
                 });
+
+                var endPointRouteBuilder = (IEndpointRouteBuilder)app.Properties["__EndpointRouteBuilder"]!;
+
+                endPointRouteBuilder.MapGet(options.PathMatch, httpContext =>
+                {
+                    var path = httpContext.Request.Path.Value;
+                    var redirectUrl = string.IsNullOrEmpty(path) || path.EndsWith("/") ? "index.html" : $"{path.Split('/').Last()}/index.html";
+                    httpContext.Response.StatusCode = 301;
+                    httpContext.Response.Headers["Location"] = redirectUrl;
+                    return Task.CompletedTask;
+                }).AllowAnonymousIf(options.AllowAnonymousExplicit);
+
+                endPointRouteBuilder.MapGet(options.PathMatch + "/index.html", async httpContext =>
+                {
+                    if (!await Authentication(httpContext, options))
+                    {
+                        if (httpContext.Response.StatusCode != StatusCodes.Status302Found)
+                            httpContext.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                        return;
+                    }
+
+                    httpContext.Response.StatusCode = 200;
+                    httpContext.Response.ContentType = "text/html;charset=utf-8";
+
+                    await using var stream = options.GetType().Assembly.GetManifestResourceStream(EmbeddedFileNamespace + ".index.html");
+                    if (stream == null) throw new InvalidOperationException();
+
+                    using var sr = new StreamReader(stream);
+                    var htmlBuilder = new StringBuilder(await sr.ReadToEndAsync());
+                    htmlBuilder.Replace("%(servicePrefix)", options.PathBase + options.PathMatch + "/api");
+                    htmlBuilder.Replace("%(pollingInterval)", options.StatsPollingInterval.ToString());
+                    await httpContext.Response.WriteAsync(htmlBuilder.ToString(), Encoding.UTF8);
+                }).AllowAnonymousIf(options.AllowAnonymousExplicit);
+
+                new RouteActionProvider(endPointRouteBuilder, options).MapDashboardRoutes();
             }
 
             return app;
@@ -138,7 +90,6 @@ namespace DotNetCore.CAP
             {
                 await context.ChallengeAsync(options.DefaultChallengeScheme);
                 await context.Response.CompleteAsync();
-
                 return false;
             }
 
@@ -157,6 +108,7 @@ namespace DotNetCore.CAP
                 }
                 else
                 {
+                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     return false;
                 }
             }
@@ -164,17 +116,27 @@ namespace DotNetCore.CAP
             return true;
         }
 
-        internal static async Task<bool> Authorize(HttpRequest request, HttpResponse response, DashboardOptions options, IAuthorizationService authservice)
+        internal static async Task<bool> Authorize(HttpContext httpContext, DashboardOptions options)
         {
-            if (!String.IsNullOrEmpty(options.AuthorizationPolicy) && (authservice != null))
+            IAuthorizationService authService = null;
+            if (!string.IsNullOrEmpty(options.AuthorizationPolicy))
             {
-                AuthorizationResult authorizationResult = await authservice.AuthorizeAsync(request.HttpContext.User, null, options.AuthorizationPolicy);
+                authService = httpContext.RequestServices.GetService<IAuthorizationService>();
+            }
+            if (!string.IsNullOrEmpty(options.AuthorizationPolicy) && (authService != null))
+            {
+                AuthorizationResult authorizationResult = await authService.AuthorizeAsync(httpContext.User, null, options.AuthorizationPolicy);
                 if (!authorizationResult.Succeeded)
                 {
                     return false;
                 }
             }
             return true;
+        }
+
+        internal static IEndpointConventionBuilder AllowAnonymousIf(this IEndpointConventionBuilder builder, bool allowAnonymous)
+        {
+            return allowAnonymous ? builder.AllowAnonymous() : builder;
         }
     }
 }

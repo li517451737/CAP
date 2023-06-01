@@ -5,15 +5,15 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using DotNetCore.CAP.Dashboard.GatewayProxy;
 using DotNetCore.CAP.Dashboard.NodeDiscovery;
 using DotNetCore.CAP.Internal;
 using DotNetCore.CAP.Messages;
 using DotNetCore.CAP.Monitoring;
 using DotNetCore.CAP.Persistence;
-using DotNetCore.CAP.Serialization;
 using DotNetCore.CAP.Transport;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
@@ -23,29 +23,75 @@ namespace DotNetCore.CAP.Dashboard
 {
     public class RouteActionProvider
     {
-        private readonly HttpRequest _request;
-        private readonly HttpResponse _response;
-        private readonly RouteData _routeData;
+        private readonly IEndpointRouteBuilder _builder;
+        private readonly IServiceProvider _serviceProvider;
+        private readonly DashboardOptions _options;
+        private readonly GatewayProxyAgent _agent;
+        private IMonitoringApi MonitoringApi => _serviceProvider.GetRequiredService<IDataStorage>().GetMonitoringApi();
 
-        private IServiceProvider ServiceProvider => _request.HttpContext.RequestServices;
-        private IMonitoringApi MonitoringApi => ServiceProvider.GetRequiredService<IDataStorage>().GetMonitoringApi();
-
-        public RouteActionProvider(HttpRequest request, HttpResponse response, RouteData routeData)
+        public RouteActionProvider(IEndpointRouteBuilder builder, DashboardOptions options)
         {
-            _request = request;
-            _response = response;
-            _routeData = routeData;
-            _response.StatusCode = StatusCodes.Status200OK;
+            _builder = builder;
+            _options = options;
+            _serviceProvider = builder.ServiceProvider;
+            _agent = _serviceProvider.GetService<GatewayProxyAgent>(); // may be null
         }
 
-        [HttpGet("/stats")]
-        public async Task Stats()
+        public void MapDashboardRoutes()
         {
-            var result = MonitoringApi.GetStatistics();
-            SetServersCount(result);
-            await _response.WriteAsJsonAsync(result);
+            var prefixMatch = _options.PathMatch + "/api";
 
-            void SetServersCount(StatisticsDto dto)
+            _builder.MapGet(prefixMatch + "/metrics-realtime", Metrics).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+            _builder.MapGet(prefixMatch + "/meta", MetaInfo).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+            _builder.MapGet(prefixMatch + "/stats", Stats).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+            _builder.MapGet(prefixMatch + "/metrics-history", MetricsHistory).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+            _builder.MapGet(prefixMatch + "/health", Health).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+            _builder.MapGet(prefixMatch + "/published/message/{id:long}", PublishedMessageDetails).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+            _builder.MapGet(prefixMatch + "/received/message/{id:long}", ReceivedMessageDetails).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+
+            _builder.MapPost(prefixMatch + "/published/requeue", PublishedRequeue).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+            _builder.MapPost(prefixMatch + "/received/reexecute", ReceivedRequeue).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+
+            _builder.MapGet(prefixMatch + "/published/{status}", PublishedList).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+            _builder.MapGet(prefixMatch + "/received/{status}", ReceivedList).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+            _builder.MapGet(prefixMatch + "/subscriber", Subscribers).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+            _builder.MapGet(prefixMatch + "/nodes", Nodes).AllowAnonymousIf(_options.AllowAnonymousExplicit);
+        }
+         
+        public async Task Metrics(HttpContext httpContext)
+        {
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+
+            var metrics = _serviceProvider.GetRequiredService<CapMetricsEventListener>();
+            await httpContext.Response.WriteAsJsonAsync(metrics.GetRealTimeMetrics());
+        }
+
+        public async Task MetaInfo(HttpContext httpContext)
+        {
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+            if (!await Auth(httpContext)) return;
+
+            var cap = _serviceProvider.GetRequiredService<CapMarkerService>();
+            var broker = _serviceProvider.GetRequiredService<CapMessageQueueMakerService>();
+            var storage = _serviceProvider.GetRequiredService<CapStorageMarkerService>();
+
+            await httpContext.Response.WriteAsJsonAsync(new
+            {
+                cap,
+                broker,
+                storage
+            });
+        }
+
+        public async Task Stats(HttpContext httpContext)
+        {
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+
+            var result = await MonitoringApi.GetStatisticsAsync();
+            await SetServersCountAsync(result);
+            await httpContext.Response.WriteAsJsonAsync(result);
+
+            async Task SetServersCountAsync(StatisticsDto dto)
             {
                 if (CapCache.Global.TryGet("cap.nodes.count", out var count))
                 {
@@ -53,144 +99,153 @@ namespace DotNetCore.CAP.Dashboard
                 }
                 else
                 {
-                    if (ServiceProvider.GetService<DiscoveryOptions>() != null)
+                    if (_serviceProvider.GetService<DiscoveryOptions>() != null)
                     {
-                        var discoveryProvider = ServiceProvider.GetRequiredService<INodeDiscoveryProvider>();
-                        var nodes = discoveryProvider.GetNodes();
+                        var discoveryProvider = _serviceProvider.GetRequiredService<INodeDiscoveryProvider>();
+                        var nodes = await discoveryProvider.GetNodes();
                         dto.Servers = nodes.Count;
                     }
                 }
             }
         }
 
-        [HttpGet("/metrics")]
-        public async Task Metrics()
+        public async Task MetricsHistory(HttpContext httpContext)
         {
-            const string cacheKey = "dashboard.metrics";
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+            if (!await Auth(httpContext)) return;
+
+            const string cacheKey = "dashboard.metrics.history";
             if (CapCache.Global.TryGet(cacheKey, out var ret))
             {
-                await _response.WriteAsJsonAsync(ret);
+                await httpContext.Response.WriteAsJsonAsync(ret);
                 return;
             }
 
-            var ps = MonitoringApi.HourlySucceededJobs(MessageType.Publish);
-            var pf = MonitoringApi.HourlyFailedJobs(MessageType.Publish);
-            var ss = MonitoringApi.HourlySucceededJobs(MessageType.Subscribe);
-            var sf = MonitoringApi.HourlyFailedJobs(MessageType.Subscribe);
+            var ps = await MonitoringApi.HourlySucceededJobs(MessageType.Publish);
+            var pf = await MonitoringApi.HourlyFailedJobs(MessageType.Publish);
+            var ss = await MonitoringApi.HourlySucceededJobs(MessageType.Subscribe);
+            var sf = await MonitoringApi.HourlyFailedJobs(MessageType.Subscribe);
 
-            var dayHour = ps.Keys.Select(x => x.ToString("MM-dd HH:00")).ToList(); 
+            var dayHour = ps.Keys.OrderBy(x => x).Select(x => new DateTimeOffset(x).ToUnixTimeSeconds());
 
             var result = new
             {
-                DayHour = dayHour,
-                PublishSuccessed = ps.Values,
-                PublishFailed = pf.Values,
-                SubscribeSuccessed = ss.Values,
-                SubscribeFailed = sf.Values,
+                DayHour = dayHour.ToArray(),
+                PublishSuccessed = ps.Values.Reverse(),
+                PublishFailed = pf.Values.Reverse(),
+                SubscribeSuccessed = ss.Values.Reverse(),
+                SubscribeFailed = sf.Values.Reverse()
             };
 
             CapCache.Global.AddOrUpdate(cacheKey, result, TimeSpan.FromMinutes(10));
 
-            await _response.WriteAsJsonAsync(result);
+            await httpContext.Response.WriteAsJsonAsync(result);
         }
 
-        [HttpGet("/health")]
-        public Task Health()
+        public Task Health(HttpContext httpContext)
         {
-            _response.WriteAsync("OK");
+            httpContext.Response.WriteAsync("OK");
             return Task.CompletedTask;
         }
 
-        [HttpGet("/published/message/{id:long}")]
-        public async Task PublishedMessageDetails()
+        public async Task PublishedMessageDetails(HttpContext httpContext)
         {
-            if (long.TryParse(_routeData.Values["id"]?.ToString() ?? string.Empty, out long id))
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+            if (!await Auth(httpContext)) return;
+
+            if (long.TryParse(httpContext.GetRouteData().Values["id"]?.ToString() ?? string.Empty, out long id))
             {
                 var message = await MonitoringApi.GetPublishedMessageAsync(id);
                 if (message == null)
                 {
-                    _response.StatusCode = StatusCodes.Status404NotFound;
+                    httpContext.Response.StatusCode = StatusCodes.Status404NotFound;
                     return;
                 }
-                await _response.WriteAsJsonAsync(message.Content);
+                await httpContext.Response.WriteAsJsonAsync(message.Content);
             }
             else
             {
-                BadRequest();
+                BadRequest(httpContext);
             }
         }
 
-        [HttpGet("/received/message/{id:long}")]
-        public async Task ReceivedMessageDetails()
+        public async Task ReceivedMessageDetails(HttpContext httpContext)
         {
-            if (long.TryParse(_routeData.Values["id"]?.ToString() ?? string.Empty, out long id))
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+            if (!await Auth(httpContext)) return;
+
+            if (long.TryParse(httpContext.GetRouteData().Values["id"]?.ToString() ?? string.Empty, out long id))
             {
                 var message = await MonitoringApi.GetReceivedMessageAsync(id);
                 if (message == null)
                 {
-                    _response.StatusCode = StatusCodes.Status404NotFound;
+                    httpContext.Response.StatusCode = StatusCodes.Status404NotFound;
                     return;
                 }
-                await _response.WriteAsJsonAsync(message.Content);
+                await httpContext.Response.WriteAsJsonAsync(message.Content);
             }
             else
             {
-                BadRequest();
+                BadRequest(httpContext);
             }
         }
 
-        [HttpPost("/published/requeue")]
-        public async Task PublishedRequeue()
+        public async Task PublishedRequeue(HttpContext httpContext)
         {
-            //var form = await _request.ReadFormAsync();
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+            if (!await Auth(httpContext)) return;
+
+            //var form = await httpContext.Request.ReadFormAsync();
             //var messageIds =  form["messages[]"]
-            var messageIds = await _request.ReadFromJsonAsync<long[]>();
+            var messageIds = await httpContext.Request.ReadFromJsonAsync<long[]>();
             if (messageIds == null || messageIds.Length == 0)
             {
-                _response.StatusCode = StatusCodes.Status422UnprocessableEntity;
+                httpContext.Response.StatusCode = StatusCodes.Status422UnprocessableEntity;
                 return;
             }
 
             foreach (var messageId in messageIds)
             {
                 var message = await MonitoringApi.GetPublishedMessageAsync(messageId);
-                message.Origin = ServiceProvider.GetRequiredService<ISerializer>().Deserialize(message.Content);
-                ServiceProvider.GetRequiredService<IDispatcher>().EnqueueToPublish(message);
+                if (message != null)
+                    await _serviceProvider.GetRequiredService<IDispatcher>().EnqueueToPublish(message);
             }
 
-            _response.StatusCode = StatusCodes.Status204NoContent;
+            httpContext.Response.StatusCode = StatusCodes.Status204NoContent;
         }
 
-        [HttpPost("/received/reexecute")]
-        public async Task ReceivedRequeue()
+        public async Task ReceivedRequeue(HttpContext httpContext)
         {
-            //var form = await _request.ReadFormAsync();
-            //var messageIds =  form["messages[]"]
-            var messageIds = await _request.ReadFromJsonAsync<long[]>();
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+            if (!await Auth(httpContext)) return;
+
+            var messageIds = await httpContext.Request.ReadFromJsonAsync<long[]>();
             if (messageIds == null || messageIds.Length == 0)
             {
-                _response.StatusCode = StatusCodes.Status422UnprocessableEntity;
+                httpContext.Response.StatusCode = StatusCodes.Status422UnprocessableEntity;
                 return;
             }
 
             foreach (var messageId in messageIds)
             {
                 var message = await MonitoringApi.GetReceivedMessageAsync(messageId);
-                message.Origin = ServiceProvider.GetRequiredService<ISerializer>().Deserialize(message.Content);
-                await ServiceProvider.GetRequiredService<ISubscribeDispatcher>().DispatchAsync(message);
+                if (message != null)
+                    await _serviceProvider.GetRequiredService<IDispatcher>().EnqueueToExecute(message);
             }
 
-            _response.StatusCode = StatusCodes.Status204NoContent;
+            httpContext.Response.StatusCode = StatusCodes.Status204NoContent;
         }
 
-        [HttpGet("/published/{status}")]
-        public async Task PublishedList()
+        public async Task PublishedList(HttpContext httpContext)
         {
-            var routeValue = _routeData.Values;
-            var pageSize = _request.Query["perPage"].ToInt32OrDefault(20);
-            var pageIndex = _request.Query["currentPage"].ToInt32OrDefault(1);
-            var name = _request.Query["name"].ToString();
-            var content = _request.Query["content"].ToString();
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+            if (!await Auth(httpContext)) return;
+
+            var routeValue = httpContext.GetRouteData().Values;
+            var pageSize = httpContext.Request.Query["perPage"].ToInt32OrDefault(20);
+            var pageIndex = httpContext.Request.Query["currentPage"].ToInt32OrDefault(1);
+            var name = httpContext.Request.Query["name"].ToString();
+            var content = httpContext.Request.Query["content"].ToString();
             var status = routeValue["status"]?.ToString() ?? nameof(StatusName.Succeeded);
 
             var queryDto = new MessageQueryDto
@@ -203,20 +258,22 @@ namespace DotNetCore.CAP.Dashboard
                 PageSize = pageSize
             };
 
-            var result = MonitoringApi.Messages(queryDto);
+            var result = await MonitoringApi.GetMessagesAsync(queryDto);
 
-            await _response.WriteAsJsonAsync(result);
+            await httpContext.Response.WriteAsJsonAsync(result);
         }
 
-        [HttpGet("/received/{status}")]
-        public async Task ReceivedList()
+        public async Task ReceivedList(HttpContext httpContext)
         {
-            var routeValue = _routeData.Values;
-            var pageSize = _request.Query["perPage"].ToInt32OrDefault(20);
-            var pageIndex = _request.Query["currentPage"].ToInt32OrDefault(1);
-            var name = _request.Query["name"].ToString();
-            var group = _request.Query["group"].ToString();
-            var content = _request.Query["content"].ToString();
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+            if (!await Auth(httpContext)) return;
+
+            var routeValue = httpContext.GetRouteData().Values;
+            var pageSize = httpContext.Request.Query["perPage"].ToInt32OrDefault(20);
+            var pageIndex = httpContext.Request.Query["currentPage"].ToInt32OrDefault(1);
+            var name = httpContext.Request.Query["name"].ToString();
+            var group = httpContext.Request.Query["group"].ToString();
+            var content = httpContext.Request.Query["content"].ToString();
             var status = routeValue["status"]?.ToString() ?? nameof(StatusName.Succeeded);
 
             var queryDto = new MessageQueryDto
@@ -230,15 +287,17 @@ namespace DotNetCore.CAP.Dashboard
                 PageSize = pageSize
             };
 
-            var result = MonitoringApi.Messages(queryDto);
+            var result = await MonitoringApi.GetMessagesAsync(queryDto);
 
-            await _response.WriteAsJsonAsync(result);
+            await httpContext.Response.WriteAsJsonAsync(result);
         }
 
-        [HttpGet("/subscriber")]
-        public async Task Subscribers()
+        public async Task Subscribers(HttpContext httpContext)
         {
-            var cache = ServiceProvider.GetRequiredService<MethodMatcherCache>();
+            if (_agent != null && await _agent.Invoke(httpContext)) return;
+            if (!await Auth(httpContext)) return;
+
+            var cache = _serviceProvider.GetRequiredService<MethodMatcherCache>();
             var subscribers = cache.GetCandidatesMethodsOfGroupNameGrouped();
 
             var result = new List<WarpResult>();
@@ -261,28 +320,45 @@ namespace DotNetCore.CAP.Dashboard
                 }
                 result.Add(inner);
             }
-            await _response.WriteAsJsonAsync(result);
+            await httpContext.Response.WriteAsJsonAsync(result);
         }
 
-        [HttpGet("/nodes")]
-        public async Task Nodes()
+        public async Task Nodes(HttpContext httpContext)
         {
+            if (!await Auth(httpContext)) return;
+
             IList<Node> result = new List<Node>();
-            var discoveryProvider = ServiceProvider.GetService<INodeDiscoveryProvider>();
+            var discoveryProvider = _serviceProvider.GetService<INodeDiscoveryProvider>();
             if (discoveryProvider == null)
             {
-                await _response.WriteAsJsonAsync(result);
+                await httpContext.Response.WriteAsJsonAsync(result);
                 return;
             }
 
-            result = discoveryProvider.GetNodes();
+            result = await discoveryProvider.GetNodes();
 
-            await _response.WriteAsJsonAsync(result);
+            await httpContext.Response.WriteAsJsonAsync(result);
         }
 
-        private void BadRequest()
+        private async Task<bool> Auth(HttpContext httpContext)
         {
-            _response.StatusCode = StatusCodes.Status400BadRequest;
+            if (!await CapBuilderExtension.Authentication(httpContext, _options))
+            {
+                return false;
+            }
+
+            if (!await CapBuilderExtension.Authorize(httpContext, _options))
+            {
+                httpContext.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return false;
+            }
+
+            return true;
+        }
+
+        private void BadRequest(HttpContext httpContext)
+        {
+            httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
         }
     }
 

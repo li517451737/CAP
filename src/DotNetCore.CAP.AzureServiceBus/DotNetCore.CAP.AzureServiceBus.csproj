@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>netstandard2.1</TargetFramework>
+    <TargetFramework>net6.0</TargetFramework>
 	<Nullable>enable</Nullable>
     <PackageTags>$(PackageTags);AzureServiceBus</PackageTags>
   </PropertyGroup>
@@ -13,11 +13,19 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Azure.ServiceBus" Version="5.2.0" />
+    <None Remove="Azure.Messaging.ServiceBus" />
+    <None Remove="System.Linq.Async" />
   </ItemGroup>
-
+  <ItemGroup>
+    <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.11.1" />
+    <PackageReference Include="System.Linq.Async" Version="6.0.1" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\DotNetCore.CAP\DotNetCore.CAP.csproj" />
-  </ItemGroup> 
-
+  </ItemGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>DotNetCore.CAP.AzureServiceBus.Test</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
 </Project>

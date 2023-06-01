@@ -1,15 +1,17 @@
-﻿using System.Collections.Generic;
+﻿// Copyright (c) .NET Core Community. All rights reserved.
+// Licensed under the MIT License. See License.txt in the project root for license information.
 
-namespace DotNetCore.CAP.Monitoring
+using System.Collections.Generic;
+
+namespace DotNetCore.CAP.Monitoring;
+
+public class PagedQueryResult<T>
 {
-    public class PagedQueryResult<T>
-    {
-        public IList<T>? Items { get; set; }
+    public IList<T>? Items { get; set; }
 
-        public long Totals { get; set; }
+    public long Totals { get; set; }
 
-        public int PageIndex { get; set; }
+    public int PageIndex { get; set; }
 
-        public int PageSize { get; set; }
-    }
+    public int PageSize { get; set; }
 }

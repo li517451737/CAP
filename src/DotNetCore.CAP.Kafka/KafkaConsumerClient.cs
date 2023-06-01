@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
 using DotNetCore.CAP.Internal;
@@ -29,9 +30,9 @@ namespace DotNetCore.CAP.Kafka
             _kafkaOptions = options.Value ?? throw new ArgumentNullException(nameof(options));
         }
 
-        public event EventHandler<TransportMessage>? OnMessageReceived;
+        public Func<TransportMessage, object?, Task>? OnMessageCallback { get; set; }
 
-        public event EventHandler<LogMessageEventArgs>? OnLog;
+        public Action<LogMessageEventArgs>? OnLogCallback { get; set; }
 
         public BrokerAddress BrokerAddress => new("Kafka", _kafkaOptions.Servers);
 
@@ -52,7 +53,9 @@ namespace DotNetCore.CAP.Kafka
 
                 adminClient.CreateTopicsAsync(regexTopicNames.Select(x => new TopicSpecification
                 {
-                    Name = x
+                    Name = x,
+                    NumPartitions = _kafkaOptions.TopicOptions.NumPartitions,
+                    ReplicationFactor = _kafkaOptions.TopicOptions.ReplicationFactor
                 })).GetAwaiter().GetResult();
             }
             catch (CreateTopicsException ex) when (ex.Message.Contains("already exists"))
@@ -65,7 +68,7 @@ namespace DotNetCore.CAP.Kafka
                     LogType = MqLogType.ConsumeError,
                     Reason = $"An error was encountered when automatically creating topic! -->" + ex.Message
                 };
-                OnLog?.Invoke(null, logArgs);
+                OnLogCallback!(logArgs);
             }
 
             return regexTopicNames;
@@ -87,13 +90,14 @@ namespace DotNetCore.CAP.Kafka
         {
             Connect();
 
-            while (true)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 ConsumeResult<string, byte[]> consumerResult;
 
                 try
                 {
-                    consumerResult = _consumerClient!.Consume(cancellationToken);
+                    consumerResult = _consumerClient!.Consume(timeout);
+                    if (consumerResult == null) continue;
                 }
                 catch (ConsumeException e) when (_kafkaOptions.RetriableErrorCodes.Contains(e.Error.Code))
                 {
@@ -102,7 +106,7 @@ namespace DotNetCore.CAP.Kafka
                         LogType = MqLogType.ConsumeRetries,
                         Reason = e.Error.ToString()
                     };
-                    OnLog?.Invoke(null, logArgs);
+                    OnLogCallback!(logArgs);
 
                     continue;
                 }
@@ -128,14 +132,14 @@ namespace DotNetCore.CAP.Kafka
 
                 var message = new TransportMessage(headers, consumerResult.Message.Value);
 
-                OnMessageReceived?.Invoke(consumerResult, message);
+                OnMessageCallback!(message, consumerResult).GetAwaiter().GetResult();
             }
             // ReSharper disable once FunctionNeverReturns
         }
 
-        public void Commit(object sender)
+        public void Commit(object? sender)
         {
-            _consumerClient!.Commit((ConsumeResult<string, byte[]>)sender);
+            _consumerClient!.Commit((ConsumeResult<string, byte[]>)sender!);
         }
 
         public void Reject(object? sender)
@@ -192,7 +196,7 @@ namespace DotNetCore.CAP.Kafka
                 LogType = MqLogType.ServerConnError,
                 Reason = $"An error occurred during connect kafka --> {e.Reason}"
             };
-            OnLog?.Invoke(null, logArgs);
+            OnLogCallback!(logArgs);
         }
     }
 }

@@ -1,14 +1,18 @@
-﻿using System.Threading;
+﻿// Copyright (c) .NET Core Community. All rights reserved.
+// Licensed under the MIT License. See License.txt in the project root for license information.
+
+using System.Threading;
 using System.Threading.Tasks;
 
-namespace DotNetCore.CAP.Persistence
+namespace DotNetCore.CAP.Persistence;
+
+public interface IStorageInitializer
 {
-    public interface IStorageInitializer
-    {
-        Task InitializeAsync(CancellationToken cancellationToken);
+    Task InitializeAsync(CancellationToken cancellationToken);
 
-        string GetPublishedTableName();
+    string GetPublishedTableName();
 
-        string GetReceivedTableName();
-    }
+    string GetReceivedTableName();
+
+    string GetLockTableName();
 }

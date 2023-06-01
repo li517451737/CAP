@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using DotNetCore.CAP.Internal;
 using DotNetCore.CAP.Messages;
 using DotNetCore.CAP.Transport;
@@ -29,11 +30,11 @@ namespace DotNetCore.CAP.NATS
             _natsOptions = options.Value ?? throw new ArgumentNullException(nameof(options));
         }
 
-        public event EventHandler<TransportMessage>? OnMessageReceived;
+        public Func<TransportMessage, object?, Task>? OnMessageCallback { get; set; }
 
-        public event EventHandler<LogMessageEventArgs>? OnLog;
+        public Action<LogMessageEventArgs>? OnLogCallback { get; set; }
 
-        public BrokerAddress BrokerAddress => new ("NATS", _natsOptions.Servers);
+        public BrokerAddress BrokerAddress => new("NATS", _natsOptions.Servers);
 
         public ICollection<string> FetchTopics(IEnumerable<string> topicNames)
         {
@@ -45,20 +46,22 @@ namespace DotNetCore.CAP.NATS
 
             foreach (var subjectStream in streamGroup)
             {
+                var builder = StreamConfiguration.Builder()
+                    .WithName(subjectStream.Key)
+                    .WithNoAck(false)
+                    .WithStorageType(StorageType.Memory)
+                    .WithSubjects(subjectStream.ToList());
+
+                _natsOptions.StreamOptions?.Invoke(builder);
+
                 try
                 {
                     jsm.GetStreamInfo(subjectStream.Key); // this throws if the stream does not exist
+
+                    jsm.UpdateStream(builder.Build());
                 }
                 catch (NATSJetStreamException)
                 {
-                    var builder = StreamConfiguration.Builder()
-                        .WithName(subjectStream.Key)
-                        .WithNoAck(false)
-                        .WithStorageType(StorageType.Memory)
-                        .WithSubjects(subjectStream.ToList());
-
-                    _natsOptions.StreamOptions?.Invoke(builder);
-
                     try
                     {
                         jsm.AddStream(builder.Build());
@@ -83,17 +86,36 @@ namespace DotNetCore.CAP.NATS
             Connect();
 
             var js = _consumerClient!.CreateJetStreamContext();
+            var streamGroup = topics.GroupBy(x => _natsOptions.NormalizeStreamName(x));
 
-            foreach (var subject in topics)
+            ConnectionLock.Wait();
+            foreach (var subjectStream in streamGroup)
             {
-                var streamName = _natsOptions.NormalizeStreamName(subject);
-                var pso = PushSubscribeOptions.Builder()
-                    .WithStream(streamName)
-                    .WithConfiguration(ConsumerConfiguration.Builder().WithDeliverPolicy(DeliverPolicy.New).Build())
-                    .Build();
+                var groupName = Helper.Normalized(_groupId);
 
-                js.PushSubscribeAsync(subject, Helper.Normalized(_groupId), Subscription_MessageHandler, false, pso);
+                foreach (var subject in subjectStream)
+                {
+                    try
+                    {
+                        var pso = PushSubscribeOptions.Builder()
+                            .WithStream(subjectStream.Key)
+                            .WithConfiguration(ConsumerConfiguration.Builder()
+                                .WithDurable(Helper.Normalized(groupName + "-" + subject))
+                                .WithDeliverPolicy(DeliverPolicy.All)
+                                .WithAckWait(10000)
+                                .WithAckPolicy(AckPolicy.Explicit)
+                                .Build())
+                            .Build();
+
+                        js.PushSubscribeAsync(subject, groupName, SubscriptionMessageHandler, false, pso);
+                    }
+                    catch (Exception e)
+                    {
+                        Console.WriteLine(e);
+                    }
+                }
             }
+            ConnectionLock.Release();
         }
 
         public void Listening(TimeSpan timeout, CancellationToken cancellationToken)
@@ -106,7 +128,7 @@ namespace DotNetCore.CAP.NATS
             // ReSharper disable once FunctionNeverReturns
         }
 
-        private void Subscription_MessageHandler(object sender, MsgHandlerEventArgs e)
+        private void SubscriptionMessageHandler(object? sender, MsgHandlerEventArgs e)
         {
             var headers = new Dictionary<string, string?>();
 
@@ -117,10 +139,10 @@ namespace DotNetCore.CAP.NATS
 
             headers.Add(Headers.Group, _groupId);
 
-            OnMessageReceived?.Invoke(e.Message, new TransportMessage(headers, e.Message.Data));
+            OnMessageCallback!(new TransportMessage(headers, e.Message.Data), e.Message);
         }
 
-        public void Commit(object sender)
+        public void Commit(object? sender)
         {
             if (sender is Msg msg)
             {
@@ -156,10 +178,12 @@ namespace DotNetCore.CAP.NATS
                 {
                     var opts = _natsOptions.Options ?? ConnectionFactory.GetDefaultOptions();
                     opts.Url ??= _natsOptions.Servers;
-                    opts.ClosedEventHandler = ConnectedEventHandler;
-                    opts.DisconnectedEventHandler = ConnectedEventHandler;
+                    opts.DisconnectedEventHandler = DisconnectedEventHandler;
                     opts.AsyncErrorEventHandler = AsyncErrorEventHandler;
                     opts.Timeout = 5000;
+                    opts.AllowReconnect = false;
+                    opts.NoEcho = true;
+
                     _consumerClient = new ConnectionFactory().CreateConnection(opts);
                 }
             }
@@ -169,24 +193,27 @@ namespace DotNetCore.CAP.NATS
             }
         }
 
-        private void ConnectedEventHandler(object sender, ConnEventArgs e)
+        private void DisconnectedEventHandler(object? sender, ConnEventArgs e)
         {
-            var logArgs = new LogMessageEventArgs
+            if (e.Error is { Message: "Server closed the connection." })
             {
-                LogType = MqLogType.ConnectError,
-                Reason = e.Error?.ToString()
-            };
-            OnLog?.Invoke(null, logArgs);
+                var logArgs = new LogMessageEventArgs
+                {
+                    LogType = MqLogType.ConnectError,
+                    Reason = e.Error.ToString()
+                };
+                OnLogCallback!(logArgs);
+            }
         }
 
-        private void AsyncErrorEventHandler(object sender, ErrEventArgs e)
+        private void AsyncErrorEventHandler(object? sender, ErrEventArgs e)
         {
             var logArgs = new LogMessageEventArgs
             {
                 LogType = MqLogType.AsyncErrorEvent,
                 Reason = e.Error
             };
-            OnLog?.Invoke(null, logArgs);
+            OnLogCallback!(logArgs);
         }
     }
 }

@@ -1,6 +1,7 @@
 ﻿// Copyright (c) .NET Core Community. All rights reserved.
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
+using System;
 using DotNetCore.CAP.Transport;
 using Microsoft.Extensions.Options;
 
@@ -25,7 +26,7 @@ namespace DotNetCore.CAP.RabbitMQ
                client.Connect();
                return client;
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 throw new BrokerConnectionException(e);
             }

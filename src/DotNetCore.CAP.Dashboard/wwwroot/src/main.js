@@ -1,17 +1,28 @@
 import Vue from 'vue'
 import App from './App.vue'
 import router from './router'
-import baseURL from './global'
-import { BootstrapVue, IconsPlugin } from 'bootstrap-vue'
+import BootstrapVue from 'bootstrap-vue'
 import VueJsonPretty from 'vue-json-pretty';
 import 'vue-json-pretty/lib/styles.css';
 import 'bootstrap/dist/css/bootstrap.css'
 import 'bootstrap-vue/dist/bootstrap-vue.css'
-import store from '@/store/store.js'
+import store from '../src/store/store.js'
 import axios from "axios";
 import VueI18n from 'vue-i18n'
+import * as zh from './assets/language/zh-cn'
+import * as en from './assets/language/en-us'
 //
-//
+
+let baseURL = "";
+switch (import.meta.env.MODE) {
+  case 'development':
+      baseURL = "/cap/api";
+      break
+  default:
+      baseURL = window.serverUrl;
+      break
+}
+
 axios.defaults.baseURL = baseURL;
 axios.defaults.withCredentials = true
 axios.defaults.headers.post['Content-Type'] = 'application/json';
@@ -32,28 +43,26 @@ axios.interceptors.request.use(
 
 Vue.config.productionTip = false
 
-// Make BootstrapVue available throughout your project
 Vue.use(BootstrapVue)
-Vue.use(IconsPlugin)
 Vue.component("vue-json-pretty", VueJsonPretty)
 Vue.use(VueI18n)
 
 const i18n = new VueI18n({
-    locale:(function(){
-        if(localStorage.getItem('lang')){
-            return localStorage.getItem('lang')
-        }
-        return 'en-us'
-    }()),
-    messages:{
-        'en-us':require('./assets/language/en-us'), //英文语言包
-        'zh-cn':require('./assets/language/zh-cn'), //中文繁体包
+  locale: (function () {
+    if (localStorage.getItem('lang')) {
+      return localStorage.getItem('lang')
     }
+    return 'en-us'
+  }()),
+  messages: {
+    'en-us': en.default,
+    'zh-cn': zh.default,
+  }
 })
 
 new Vue({
   router,
   store,
-    i18n,
+  i18n,
   render: h => h(App)
 }).$mount('#app')

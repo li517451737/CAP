@@ -44,10 +44,10 @@ namespace DotNetCore.CAP.Kafka
                 {
                     Headers = headers,
                     Key = message.Headers.TryGetValue(KafkaHeaders.KafkaKey, out string? kafkaMessageKey) && !string.IsNullOrEmpty(kafkaMessageKey) ? kafkaMessageKey : message.GetId(),
-                    Value = message.Body!
+                    Value = message.Body.ToArray()!
                 });
 
-                if (result.Status == PersistenceStatus.Persisted || result.Status == PersistenceStatus.PossiblyPersisted)
+                if (result.Status is PersistenceStatus.Persisted or PersistenceStatus.PossiblyPersisted)
                 {
                     _logger.LogDebug($"kafka topic message [{message.GetName()}] has been published.");
 
@@ -58,9 +58,9 @@ namespace DotNetCore.CAP.Kafka
             }
             catch (Exception ex)
             {
-                var wapperEx = new PublisherSentFailedException(ex.Message, ex);
+                var warpEx = new PublisherSentFailedException(ex.Message, ex);
 
-                return OperateResult.Failed(wapperEx);
+                return OperateResult.Failed(warpEx);
             }
             finally
             {

@@ -15,11 +15,13 @@ namespace DotNetCore.CAP.RabbitMQ
     public class ConnectionChannelPool : IConnectionChannelPool, IDisposable
     {
         private const int DefaultPoolSize = 15;
+
         private readonly Func<IConnection> _connectionActivator;
         private readonly ILogger<ConnectionChannelPool> _logger;
         private readonly ConcurrentQueue<IModel> _pool;
+        private readonly bool _isPublishConfirms;
         private IConnection? _connection;
-        private static readonly object SLock = new object();
+        private static readonly object SLock = new();
 
         private int _count;
         private int _maxSize;
@@ -37,6 +39,7 @@ namespace DotNetCore.CAP.RabbitMQ
             var options = optionsAccessor.Value;
 
             _connectionActivator = CreateConnection(options);
+            _isPublishConfirms = options.PublishConfirms;
 
             HostAddress = $"{options.HostName}:{options.Port}";
             Exchange = "v1" == capOptions.Version ? options.ExchangeName : $"{options.ExchangeName}.{capOptions.Version}";
@@ -99,17 +102,16 @@ namespace DotNetCore.CAP.RabbitMQ
                 Port = options.Port,
                 Password = options.Password,
                 VirtualHost = options.VirtualHost,
-                ClientProvidedName = Assembly.GetEntryAssembly()?.GetName().Name.ToLower()
+                DispatchConsumersAsync = true,
+                ClientProvidedName = Assembly.GetEntryAssembly()?.GetName().Name!.ToLower()
             };
 
             if (options.HostName.Contains(","))
             {
                 options.ConnectionFactoryOptions?.Invoke(factory);
 
-                return () => factory.CreateConnection(
-                    options.HostName.Split(new[] { "," }, StringSplitOptions.RemoveEmptyEntries));
+                return () => factory.CreateConnection(AmqpTcpEndpoint.ParseMultiple(options.HostName));
             }
-
             factory.HostName = options.HostName;
             options.ConnectionFactoryOptions?.Invoke(factory);
             return () => factory.CreateConnection();
@@ -129,6 +131,11 @@ namespace DotNetCore.CAP.RabbitMQ
             try
             {
                 model = GetConnection().CreateModel();
+                model.ExchangeDeclare(Exchange, RabbitMQOptions.ExchangeType, true);
+                if (_isPublishConfirms)
+                {
+                    model.ConfirmSelect();
+                }
             }
             catch (Exception e)
             {

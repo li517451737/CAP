@@ -2,6 +2,9 @@
 
 CAP provides a Dashboard for viewing messages, and features provided by Dashboard make it easy to view and manage messages.
 
+!!! WARNING "Usage Limit"
+    The Dashboard is only supported for use in ASP.NET Core, Not supported for console application
+    
 ## Enable Dashboard
 
 By default, Dashboard middleware will not be launched. To enable Dashboard functionality you need to add the following code to your configuration:
@@ -71,7 +74,7 @@ services
     .AddCookie()
     .AddOpenIdConnect(options =>
     {
-        options.Authority = "https://demo.identityserver.io/";
+        options.Authority = "https://demo.duendesoftware.com/";
         options.ClientId = "interactive.confidential";
         options.ClientSecret = "secret";
         options.ResponseType = "code";
