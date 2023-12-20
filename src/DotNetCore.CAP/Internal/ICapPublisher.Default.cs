@@ -22,6 +22,7 @@ internal class CapPublisher : ICapPublisher
         new(CapDiagnosticListenerNames.DiagnosticListenerName);
 
     private readonly CapOptions _capOptions;
+    private readonly ISnowflakeId _snowflakeId;
     private readonly IDispatcher _dispatcher;
     private readonly IDataStorage _storage;
     private readonly IBootstrapper _bootstrapper;
@@ -33,6 +34,7 @@ internal class CapPublisher : ICapPublisher
         _dispatcher = service.GetRequiredService<IDispatcher>();
         _storage = service.GetRequiredService<IDataStorage>();
         _capOptions = service.GetRequiredService<IOptions<CapOptions>>().Value;
+        _snowflakeId = service.GetRequiredService<ISnowflakeId>();
         Transaction = new AsyncLocal<ICapTransaction>();
     }
 
@@ -112,7 +114,7 @@ internal class CapPublisher : ICapPublisher
 
         if (!headers.ContainsKey(Headers.MessageId))
         {
-            var messageId = SnowflakeId.Default().NextId().ToString();
+            var messageId = _snowflakeId.NextId().ToString();
             headers.Add(Headers.MessageId, messageId);
         }
 
@@ -183,7 +185,7 @@ internal class CapPublisher : ICapPublisher
 
     #region tracing
 
-    private long? TracingBefore(Message message)
+    private static long? TracingBefore(Message message)
     {
         if (s_diagnosticListener.IsEnabled(CapDiagnosticListenerNames.BeforePublishMessageStore))
         {
@@ -202,7 +204,7 @@ internal class CapPublisher : ICapPublisher
         return null;
     }
 
-    private void TracingAfter(long? tracingTimestamp, Message message)
+    private static void TracingAfter(long? tracingTimestamp, Message message)
     {
         if (tracingTimestamp != null &&
             s_diagnosticListener.IsEnabled(CapDiagnosticListenerNames.AfterPublishMessageStore))
@@ -220,7 +222,7 @@ internal class CapPublisher : ICapPublisher
         }
     }
 
-    private void TracingError(long? tracingTimestamp, Message message, Exception ex)
+    private static void TracingError(long? tracingTimestamp, Message message, Exception ex)
     {
         if (tracingTimestamp != null &&
             s_diagnosticListener.IsEnabled(CapDiagnosticListenerNames.ErrorPublishMessageStore))

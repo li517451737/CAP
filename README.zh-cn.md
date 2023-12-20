@@ -3,7 +3,7 @@
 </p>
 
 # CAP 　　　　　　　　　　　　　　　　　　　　[English](https://github.com/dotnetcore/CAP/blob/master/README.md)
-[![Docs&Dahsboard](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashbaord.yml/badge.svg?branch=master)](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashbaord.yml)
+[![Docs&Dashboard](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashboard.yml/badge.svg?branch=master)](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashboard.yml)
 [![AppVeyor](https://ci.appveyor.com/api/projects/status/v8gfh6pe2u2laqoa?svg=true)](https://ci.appveyor.com/project/yang-xiaodong/cap)
 [![NuGet](https://img.shields.io/nuget/v/DotNetCore.CAP.svg)](https://www.nuget.org/packages/DotNetCore.CAP/)
 [![NuGet Preview](https://img.shields.io/nuget/vpre/DotNetCore.CAP.svg?label=nuget-pre)](https://www.nuget.org/packages/DotNetCore.CAP/)
@@ -264,7 +264,7 @@ services.AddCap(x =>
 
 CAP 同时提供了仪表盘（Dashboard）功能，你可以很方便的查看发出和接收到的消息。 除此之外，你还可以在仪表盘中实时查看发送或者接收到的消息。 
 
-使用一下命令安装 Dashboard：
+使用以下命令安装 Dashboard：
 
 ```
 PM> Install-Package DotNetCore.CAP.Dashboard
@@ -272,26 +272,15 @@ PM> Install-Package DotNetCore.CAP.Dashboard
 
 在分布式环境中，仪表盘内置集成了 [Consul](http://consul.io) 作为节点的注册发现，同时实现了网关代理功能，你同样可以方便的查看本节点或者其他节点的数据，它就像你访问本地资源一样。
 
-```c#
-services.AddCap(x =>
-{
-    //...
-    
-    // 注册 Dashboard
-    x.UseDashboard();
-    
-    // 注册节点到 Consul
-    x.UseDiscovery(d =>
-    {
-        d.DiscoveryServerHostName = "localhost";
-        d.DiscoveryServerPort = 8500;
-        d.CurrentNodeHostName = "localhost";
-        d.CurrentNodePort = 5800;
-        d.NodeId = "instance-id";
-        d.NodeName = "Catalog";
-    });
-});
+[查看 Consul 配置文档](https://cap.dotnetcore.xyz/user-guide/en/monitoring/consul)
+
+如果你的服务部署在Kubernetes中，请使用我们为Kubernetes专门提供的发现包。
+
 ```
+PM> Install-Package DotNetCore.CAP.Dashboard.K8s
+```
+
+[查看 Kubernetes 配置文档](https://cap.dotnetcore.xyz/user-guide/en/monitoring/kubernetes/)
 
 仪表盘默认的访问地址是：[http://localhost:xxx/cap](http://localhost:xxx/cap)，你可以在`d.MatchPath`配置项中修改`cap`路径后缀为其他的名字。
 

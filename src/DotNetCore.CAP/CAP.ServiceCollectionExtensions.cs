@@ -25,11 +25,11 @@ public static class ServiceCollectionExtensions
     /// <returns>An <see cref="CapBuilder" /> for application services.</returns>
     public static CapBuilder AddCap(this IServiceCollection services, Action<CapOptions> setupAction)
     {
-        if (setupAction == null) throw new ArgumentNullException(nameof(setupAction));
+        ArgumentNullException.ThrowIfNull(setupAction);
 
         services.AddSingleton(_ => services);
         services.TryAddSingleton(new CapMarkerService("CAP"));
-
+        services.TryAddSingleton<ISnowflakeId, SnowflakeId>();
         services.TryAddSingleton<ICapPublisher, CapPublisher>();
 
         services.TryAddSingleton<IConsumerServiceSelector, ConsumerServiceSelector>();
@@ -39,11 +39,8 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IConsumerRegister, ConsumerRegister>();
 
         //Processors
-        services.TryAddEnumerable(
-            ServiceDescriptor.Singleton<IProcessingServer, IDispatcher>(sp => sp.GetRequiredService<IDispatcher>()));
-        services.TryAddEnumerable(
-            ServiceDescriptor.Singleton<IProcessingServer, IConsumerRegister>(sp =>
-                sp.GetRequiredService<IConsumerRegister>()));
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IProcessingServer, IDispatcher>(sp => sp.GetRequiredService<IDispatcher>()));
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IProcessingServer, IConsumerRegister>(sp => sp.GetRequiredService<IConsumerRegister>()));
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IProcessingServer, CapProcessingServer>());
 
         //Queue's message processor
@@ -70,7 +67,9 @@ public static class ServiceCollectionExtensions
         else
             services.TryAddSingleton<IDispatcher, Dispatcher>();
 
-        foreach (var serviceExtension in options.Extensions) serviceExtension.AddServices(services);
+        foreach (var serviceExtension in options.Extensions)
+            serviceExtension.AddServices(services);
+
         services.Configure(setupAction);
 
         //Startup and Hosted 

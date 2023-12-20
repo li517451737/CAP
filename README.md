@@ -3,7 +3,7 @@
 </p>
 
 # CAP 　　　　　　　　　　　　　　　　　　　　[中文](https://github.com/dotnetcore/CAP/blob/master/README.zh-cn.md)
-[![Docs&Dahsboard](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashbaord.yml/badge.svg?branch=master)](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashbaord.yml)
+[![Docs&Dashboard](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashboard.yml/badge.svg?branch=master)](https://github.com/dotnetcore/CAP/actions/workflows/deploy-docs-and-dashboard.yml)
 [![AppVeyor](https://ci.appveyor.com/api/projects/status/v8gfh6pe2u2laqoa/branch/master?svg=true)](https://ci.appveyor.com/project/yang-xiaodong/cap/branch/master)
 [![NuGet](https://img.shields.io/nuget/v/DotNetCore.CAP.svg)](https://www.nuget.org/packages/DotNetCore.CAP/)
 [![NuGet Preview](https://img.shields.io/nuget/vpre/DotNetCore.CAP.svg?label=nuget-pre)](https://www.nuget.org/packages/DotNetCore.CAP/)
@@ -270,28 +270,17 @@ PM> Install-Package DotNetCore.CAP.Dashboard
 
 In the distributed environment, the dashboard built-in integrates [Consul](http://consul.io) as a node discovery, while the realization of the gateway agent function, you can also easily view the node or other node data, It's like you are visiting local resources.
 
-```c#
-services.AddCap(x =>
-{
-    //...
+[View Consul config docs](https://cap.dotnetcore.xyz/user-guide/en/monitoring/consul)
 
-    // Register Dashboard
-    x.UseDashboard();
+If your service is deployed in Kubernetes, please use our Kubernetes discovery package.
 
-    // Register to Consul
-    x.UseDiscovery(d =>
-    {
-        d.DiscoveryServerHostName = "localhost";
-        d.DiscoveryServerPort = 8500;
-        d.CurrentNodeHostName = "localhost";
-        d.CurrentNodePort = 5800;
-        d.NodeId = "instance-id";
-        d.NodeName = "Catalog";
-    });
-});
+```
+PM> Install-Package DotNetCore.CAP.Dashboard.K8s
 ```
 
-The default dashboard address is :[http://localhost:xxx/cap](http://localhost:xxx/cap), you can configure relative path `/cap` with `x.UseDashboard(opt =>{ opt.MatchPath="/mycap"; })`.
+[View Kubernetes config docs](https://cap.dotnetcore.xyz/user-guide/en/monitoring/kubernetes/)
+
+The dashboard default address is: [http://localhost:xxx/cap](http://localhost:xxx/cap) , you can configure relative path `/cap` with `x.UseDashboard(opt =>{ opt.MatchPath="/mycap"; })`.
 
 
 ## Contribute

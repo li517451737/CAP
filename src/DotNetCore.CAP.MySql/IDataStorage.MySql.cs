@@ -22,32 +22,36 @@ public class MySqlDataStorage : IDataStorage
 {
     private readonly IOptions<CapOptions> _capOptions;
     private readonly IStorageInitializer _initializer;
+    private readonly string _lockName;
     private readonly IOptions<MySqlOptions> _options;
     private readonly string _pubName;
     private readonly string _recName;
     private readonly ISerializer _serializer;
-    private readonly string _lockName;
+    private readonly ISnowflakeId _snowflakeId;
 
     public MySqlDataStorage(
         IOptions<MySqlOptions> options,
         IOptions<CapOptions> capOptions,
         IStorageInitializer initializer,
-        ISerializer serializer)
+        ISerializer serializer,
+        ISnowflakeId snowflakeId)
     {
         _options = options;
         _capOptions = capOptions;
         _initializer = initializer;
         _serializer = serializer;
+        _snowflakeId = snowflakeId;
         _pubName = initializer.GetPublishedTableName();
         _recName = initializer.GetReceivedTableName();
         _lockName = initializer.GetLockTableName();
     }
 
-    bool SupportSkipLocked => ((MySqlStorageInitializer)_initializer).IsSupportSkipLocked();
+    private bool SupportSkipLocked => ((MySqlStorageInitializer)_initializer).IsSupportSkipLocked();
 
-    public async Task<bool> AcquireLockAsync(string key, TimeSpan ttl, string instance, CancellationToken token = default)
+    public async Task<bool> AcquireLockAsync(string key, TimeSpan ttl, string instance,
+        CancellationToken token = default)
     {
-        string sql =
+        var sql =
             $"UPDATE `{_lockName}` SET `Instance`=@Instance,`LastLockTime`=@LastLockTime WHERE `Key`=@Key AND `LastLockTime` < @TTL;";
         var connection = new MySqlConnection(_options.Value.ConnectionString);
         await using var _ = connection.ConfigureAwait(false);
@@ -56,7 +60,7 @@ public class MySqlDataStorage : IDataStorage
             new MySqlParameter("@Instance", instance),
             new MySqlParameter("@LastLockTime", DateTime.Now),
             new MySqlParameter("@Key", key),
-            new MySqlParameter("@TTL",DateTime.Now.Subtract(ttl))
+            new MySqlParameter("@TTL", DateTime.Now.Subtract(ttl))
         };
         var opResult = await connection.ExecuteNonQueryAsync(sql, sqlParams: sqlParams).ConfigureAwait(false);
         return opResult > 0;
@@ -64,7 +68,7 @@ public class MySqlDataStorage : IDataStorage
 
     public async Task ReleaseLockAsync(string key, string instance, CancellationToken token = default)
     {
-        string sql =
+        var sql =
             $"UPDATE `{_lockName}` SET `Instance`='',`LastLockTime`=@LastLockTime WHERE `Key`=@Key AND `Instance`=@Instance;";
         var connection = new MySqlConnection(_options.Value.ConnectionString);
         await using var _ = connection.ConfigureAwait(false);
@@ -79,7 +83,8 @@ public class MySqlDataStorage : IDataStorage
 
     public async Task RenewLockAsync(string key, TimeSpan ttl, string instance, CancellationToken token = default)
     {
-        var sql = $"UPDATE `{_lockName}` SET `LastLockTime`= date_add(`LastLockTime`, interval {ttl.TotalSeconds} second) WHERE `Key`=@Key AND `Instance`=@Instance;";
+        var sql =
+            $"UPDATE `{_lockName}` SET `LastLockTime`= date_add(`LastLockTime`, interval {ttl.TotalSeconds} second) WHERE `Key`=@Key AND `Instance`=@Instance;";
         var connection = new MySqlConnection(_options.Value.ConnectionString);
         await using var _ = connection.ConfigureAwait(false);
         object[] sqlParams =
@@ -92,7 +97,8 @@ public class MySqlDataStorage : IDataStorage
 
     public async Task ChangePublishStateToDelayedAsync(string[] ids)
     {
-        var sql = $"UPDATE `{_pubName}` SET `StatusName`='{StatusName.Delayed}' WHERE `Id` IN ({string.Join(',', ids)});";
+        var sql =
+            $"UPDATE `{_pubName}` SET `StatusName`='{StatusName.Delayed}' WHERE `Id` IN ({string.Join(',', ids)});";
         var connection = new MySqlConnection(_options.Value.ConnectionString);
         await using var _ = connection.ConfigureAwait(false);
         await connection.ExecuteNonQueryAsync(sql).ConfigureAwait(false);
@@ -158,7 +164,7 @@ public class MySqlDataStorage : IDataStorage
     {
         object[] sqlParams =
         {
-            new MySqlParameter("@Id", SnowflakeId.Default().NextId().ToString()),
+            new MySqlParameter("@Id", _snowflakeId.NextId().ToString()),
             new MySqlParameter("@Name", name),
             new MySqlParameter("@Group", group),
             new MySqlParameter("@Content", content),
@@ -175,7 +181,7 @@ public class MySqlDataStorage : IDataStorage
     {
         var mdMessage = new MediumMessage
         {
-            DbId = SnowflakeId.Default().NextId().ToString(),
+            DbId = _snowflakeId.NextId().ToString(),
             Origin = message,
             Added = DateTime.Now,
             ExpiresAt = null,
@@ -204,19 +210,20 @@ public class MySqlDataStorage : IDataStorage
         var connection = new MySqlConnection(_options.Value.ConnectionString);
         await using var _ = connection.ConfigureAwait(false);
         return await connection.ExecuteNonQueryAsync(
-                $@"DELETE FROM `{table}` WHERE ExpiresAt < @timeout AND (StatusName='{StatusName.Succeeded}' OR StatusName='{StatusName.Failed}') limit @batchCount;", null,
+                $@"DELETE FROM `{table}` WHERE ExpiresAt < @timeout AND (StatusName='{StatusName.Succeeded}' OR StatusName='{StatusName.Failed}') limit @batchCount;",
+                null,
                 new MySqlParameter("@timeout", timeout), new MySqlParameter("@batchCount", batchCount))
             .ConfigureAwait(false);
     }
 
-    public async Task<IEnumerable<MediumMessage>> GetPublishedMessagesOfNeedRetry()
+    public Task<IEnumerable<MediumMessage>> GetPublishedMessagesOfNeedRetry(TimeSpan lookbackSeconds)
     {
-        return await GetMessagesOfNeedRetryAsync(_pubName).ConfigureAwait(false);
+        return GetMessagesOfNeedRetryAsync(_pubName, lookbackSeconds);
     }
 
-    public async Task<IEnumerable<MediumMessage>> GetReceivedMessagesOfNeedRetry()
+    public Task<IEnumerable<MediumMessage>> GetReceivedMessagesOfNeedRetry(TimeSpan lookbackSeconds)
     {
-        return await GetMessagesOfNeedRetryAsync(_recName).ConfigureAwait(false);
+        return GetMessagesOfNeedRetryAsync(_recName, lookbackSeconds);
     }
 
     public async Task ScheduleMessagesOfDelayedAsync(Func<object, IEnumerable<MediumMessage>, Task> scheduleTask,
@@ -232,7 +239,7 @@ public class MySqlDataStorage : IDataStorage
         {
             new MySqlParameter("@Version", _capOptions.Value.Version),
             new MySqlParameter("@TwoMinutesLater", DateTime.Now.AddMinutes(2)),
-            new MySqlParameter("@OneMinutesAgo", DateTime.Now.AddMinutes(-1)),
+            new MySqlParameter("@OneMinutesAgo", DateTime.Now.AddMinutes(-1))
         };
 
         await using var connection = new MySqlConnection(_options.Value.ConnectionString);
@@ -253,6 +260,7 @@ public class MySqlDataStorage : IDataStorage
                     ExpiresAt = reader.GetDateTime(4)
                 });
             }
+
             return messages;
         }, transaction, sqlParams).ConfigureAwait(false);
 
@@ -266,7 +274,8 @@ public class MySqlDataStorage : IDataStorage
         return new MySqlMonitoringApi(_options, _initializer, _serializer);
     }
 
-    private async Task ChangeMessageStateAsync(string tableName, MediumMessage message, StatusName state, object? transaction = null)
+    private async Task ChangeMessageStateAsync(string tableName, MediumMessage message, StatusName state,
+        object? transaction = null)
     {
         var sql =
             $"UPDATE `{tableName}` SET `Content`=@Content,`Retries`=@Retries,`ExpiresAt`=@ExpiresAt,`StatusName`=@StatusName WHERE `Id`=@Id;";
@@ -304,9 +313,9 @@ public class MySqlDataStorage : IDataStorage
         await connection.ExecuteNonQueryAsync(sql, sqlParams: sqlParams).ConfigureAwait(false);
     }
 
-    private async Task<IEnumerable<MediumMessage>> GetMessagesOfNeedRetryAsync(string tableName)
+    private async Task<IEnumerable<MediumMessage>> GetMessagesOfNeedRetryAsync(string tableName, TimeSpan lookbackSeconds)
     {
-        var fourMinAgo = DateTime.Now.AddMinutes(-4);
+        var fourMinAgo = DateTime.Now.Subtract(lookbackSeconds);
         var sql =
             $"SELECT `Id`,`Content`,`Retries`,`Added` FROM `{tableName}` WHERE `Retries`<@Retries " +
             $"AND `Version`=@Version AND `Added`<@Added AND (`StatusName` = '{StatusName.Failed}' OR `StatusName` = '{StatusName.Scheduled}') LIMIT 200;";
@@ -324,6 +333,7 @@ public class MySqlDataStorage : IDataStorage
         {
             var messages = new List<MediumMessage>();
             while (await reader.ReadAsync().ConfigureAwait(false))
+            {
                 messages.Add(new MediumMessage
                 {
                     DbId = reader.GetInt64(0).ToString(),
@@ -331,6 +341,7 @@ public class MySqlDataStorage : IDataStorage
                     Retries = reader.GetInt32(2),
                     Added = reader.GetDateTime(3)
                 });
+            }
 
             return messages;
         }, sqlParams: sqlParams).ConfigureAwait(false);

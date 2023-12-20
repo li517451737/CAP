@@ -22,30 +22,34 @@ public class SqlServerDataStorage : IDataStorage
 {
     private readonly IOptions<CapOptions> _capOptions;
     private readonly IStorageInitializer _initializer;
+    private readonly string _lockName;
     private readonly IOptions<SqlServerOptions> _options;
     private readonly string _pubName;
     private readonly string _recName;
     private readonly ISerializer _serializer;
-    private readonly string _lockName;
+    private readonly ISnowflakeId _snowflakeId;
 
     public SqlServerDataStorage(
         IOptions<CapOptions> capOptions,
         IOptions<SqlServerOptions> options,
         IStorageInitializer initializer,
-        ISerializer serializer)
+        ISerializer serializer,
+        ISnowflakeId snowflakeId)
     {
         _options = options;
         _initializer = initializer;
         _capOptions = capOptions;
         _serializer = serializer;
+        _snowflakeId = snowflakeId;
         _pubName = initializer.GetPublishedTableName();
         _recName = initializer.GetReceivedTableName();
         _lockName = initializer.GetLockTableName();
     }
 
-    public async Task<bool> AcquireLockAsync(string key, TimeSpan ttl, string instance, CancellationToken token = default)
+    public async Task<bool> AcquireLockAsync(string key, TimeSpan ttl, string instance,
+        CancellationToken token = default)
     {
-        string sql =
+        var sql =
             $"UPDATE {_lockName} SET [Instance]=@Instance,[LastLockTime]=@LastLockTime WHERE [Key]=@Key AND [LastLockTime] < @TTL;";
         var connection = new SqlConnection(_options.Value.ConnectionString);
         await using var _ = connection.ConfigureAwait(false);
@@ -54,7 +58,7 @@ public class SqlServerDataStorage : IDataStorage
             new SqlParameter("@Instance", instance),
             new SqlParameter("@LastLockTime", DateTime.Now),
             new SqlParameter("@Key", key),
-            new SqlParameter("@TTL",DateTime.Now.Subtract(ttl))
+            new SqlParameter("@TTL", DateTime.Now.Subtract(ttl))
         };
         var opResult = await connection.ExecuteNonQueryAsync(sql, sqlParams: sqlParams).ConfigureAwait(false);
         return opResult > 0;
@@ -62,14 +66,14 @@ public class SqlServerDataStorage : IDataStorage
 
     public async Task ReleaseLockAsync(string key, string instance, CancellationToken cancellationToken = default)
     {
-        string sql =
+        var sql =
             $"UPDATE {_lockName} SET [Instance]='',[LastLockTime]=@LastLockTime WHERE [Key]=@Key AND [Instance]=@Instance;";
         var connection = new SqlConnection(_options.Value.ConnectionString);
         await using var _ = connection.ConfigureAwait(false);
         object[] sqlParams =
         {
             new SqlParameter("@Instance", instance),
-            new SqlParameter("@LastLockTime", DateTime.MinValue){ SqlDbType = SqlDbType.DateTime2 },
+            new SqlParameter("@LastLockTime", DateTime.MinValue) { SqlDbType = SqlDbType.DateTime2 },
             new SqlParameter("@Key", key)
         };
         await connection.ExecuteNonQueryAsync(sql, sqlParams: sqlParams).ConfigureAwait(false);
@@ -77,7 +81,8 @@ public class SqlServerDataStorage : IDataStorage
 
     public async Task RenewLockAsync(string key, TimeSpan ttl, string instance, CancellationToken token = default)
     {
-        var sql = $"UPDATE {_lockName} SET [LastLockTime]=DATEADD(s,{ttl.TotalSeconds},[LastLockTime]) WHERE [Key]=@Key AND [Instance]=@Instance;";
+        var sql =
+            $"UPDATE {_lockName} SET [LastLockTime]=DATEADD(s,{ttl.TotalSeconds},[LastLockTime]) WHERE [Key]=@Key AND [Instance]=@Instance;";
         var connection = new SqlConnection(_options.Value.ConnectionString);
         await using var _ = connection.ConfigureAwait(false);
         object[] sqlParams =
@@ -156,7 +161,7 @@ public class SqlServerDataStorage : IDataStorage
     {
         object[] sqlParams =
         {
-            new SqlParameter("@Id", SnowflakeId.Default().NextId().ToString()),
+            new SqlParameter("@Id", _snowflakeId.NextId().ToString()),
             new SqlParameter("@Name", name),
             new SqlParameter("@Group", group),
             new SqlParameter("@Content", content),
@@ -173,7 +178,7 @@ public class SqlServerDataStorage : IDataStorage
     {
         var mdMessage = new MediumMessage
         {
-            DbId = SnowflakeId.Default().NextId().ToString(),
+            DbId = _snowflakeId.NextId().ToString(),
             Origin = message,
             Added = DateTime.Now,
             ExpiresAt = null,
@@ -203,21 +208,23 @@ public class SqlServerDataStorage : IDataStorage
         var connection = new SqlConnection(_options.Value.ConnectionString);
         await using var _ = connection.ConfigureAwait(false);
         return await connection.ExecuteNonQueryAsync(
-            $"DELETE TOP (@batchCount) FROM {table} WITH (readpast) WHERE ExpiresAt < @timeout AND (StatusName='{StatusName.Succeeded}' OR StatusName='{StatusName.Failed}');", null,
+            $"DELETE TOP (@batchCount) FROM {table} WITH (readpast) WHERE ExpiresAt < @timeout AND (StatusName='{StatusName.Succeeded}' OR StatusName='{StatusName.Failed}');",
+            null,
             new SqlParameter("@timeout", timeout), new SqlParameter("@batchCount", batchCount)).ConfigureAwait(false);
     }
 
-    public async Task<IEnumerable<MediumMessage>> GetPublishedMessagesOfNeedRetry()
+    public Task<IEnumerable<MediumMessage>> GetPublishedMessagesOfNeedRetry(TimeSpan lookbackSeconds)
     {
-        return await GetMessagesOfNeedRetryAsync(_pubName).ConfigureAwait(false);
+        return GetMessagesOfNeedRetryAsync(_pubName, lookbackSeconds);
     }
 
-    public async Task<IEnumerable<MediumMessage>> GetReceivedMessagesOfNeedRetry()
+    public Task<IEnumerable<MediumMessage>> GetReceivedMessagesOfNeedRetry(TimeSpan lookbackSeconds)
     {
-        return await GetMessagesOfNeedRetryAsync(_recName).ConfigureAwait(false);
+        return GetMessagesOfNeedRetryAsync(_recName, lookbackSeconds);
     }
 
-    public async Task ScheduleMessagesOfDelayedAsync(Func<object, IEnumerable<MediumMessage>, Task> scheduleTask, CancellationToken token = default)
+    public async Task ScheduleMessagesOfDelayedAsync(Func<object, IEnumerable<MediumMessage>, Task> scheduleTask,
+        CancellationToken token = default)
     {
         var sql =
             $"SELECT Id,Content,Retries,Added,ExpiresAt FROM {_pubName} WITH (UPDLOCK,READPAST) WHERE Version=@Version " +
@@ -227,7 +234,7 @@ public class SqlServerDataStorage : IDataStorage
         {
             new SqlParameter("@Version", _capOptions.Value.Version),
             new SqlParameter("@TwoMinutesLater", DateTime.Now.AddMinutes(2)),
-            new SqlParameter("@OneMinutesAgo", DateTime.Now.AddMinutes(-1)),
+            new SqlParameter("@OneMinutesAgo", DateTime.Now.AddMinutes(-1))
         };
 
         await using var connection = new SqlConnection(_options.Value.ConnectionString);
@@ -247,6 +254,7 @@ public class SqlServerDataStorage : IDataStorage
                     ExpiresAt = reader.GetDateTime(4)
                 });
             }
+
             return messages;
         }, transaction, sqlParams).ConfigureAwait(false);
 
@@ -260,7 +268,8 @@ public class SqlServerDataStorage : IDataStorage
         return new SqlServerMonitoringApi(_options, _initializer, _serializer);
     }
 
-    private async Task ChangeMessageStateAsync(string tableName, MediumMessage message, StatusName state, object? transaction = null)
+    private async Task ChangeMessageStateAsync(string tableName, MediumMessage message, StatusName state,
+        object? transaction = null)
     {
         var sql =
             $"UPDATE {tableName} SET Content=@Content, Retries=@Retries,ExpiresAt=@ExpiresAt,StatusName=@StatusName WHERE Id=@Id";
@@ -298,9 +307,9 @@ public class SqlServerDataStorage : IDataStorage
         await connection.ExecuteNonQueryAsync(sql, sqlParams: sqlParams).ConfigureAwait(false);
     }
 
-    private async Task<IEnumerable<MediumMessage>> GetMessagesOfNeedRetryAsync(string tableName)
+    private async Task<IEnumerable<MediumMessage>> GetMessagesOfNeedRetryAsync(string tableName, TimeSpan lookbackSeconds)
     {
-        var fourMinAgo = DateTime.Now.AddMinutes(-4);
+        var fourMinAgo = DateTime.Now.Subtract(lookbackSeconds);
         var sql =
             $"SELECT TOP (200) Id, Content, Retries, Added FROM {tableName} WITH (readpast) WHERE Retries<@Retries " +
             $"AND Version=@Version AND Added<@Added AND (StatusName = '{StatusName.Failed}' OR StatusName = '{StatusName.Scheduled}')";
@@ -318,6 +327,7 @@ public class SqlServerDataStorage : IDataStorage
         {
             var messages = new List<MediumMessage>();
             while (await reader.ReadAsync().ConfigureAwait(false))
+            {
                 messages.Add(new MediumMessage
                 {
                     DbId = reader.GetInt64(0).ToString(),
@@ -325,12 +335,11 @@ public class SqlServerDataStorage : IDataStorage
                     Retries = reader.GetInt32(2),
                     Added = reader.GetDateTime(3)
                 });
+            }
 
             return messages;
         }, sqlParams: sqlParams).ConfigureAwait(false);
 
         return result;
     }
-
-
 }

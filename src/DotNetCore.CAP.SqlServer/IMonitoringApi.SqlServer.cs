@@ -22,7 +22,8 @@ internal class SqlServerMonitoringApi : IMonitoringApi
     private readonly string _recName;
     private readonly ISerializer _serializer;
 
-    public SqlServerMonitoringApi(IOptions<SqlServerOptions> options, IStorageInitializer initializer, ISerializer serializer)
+    public SqlServerMonitoringApi(IOptions<SqlServerOptions> options, IStorageInitializer initializer,
+        ISerializer serializer)
     {
         _options = options.Value ?? throw new ArgumentNullException(nameof(options));
         _pubName = initializer.GetPublishedTableName();
@@ -87,23 +88,19 @@ SELECT
     {
         var tableName = queryDto.MessageType == MessageType.Publish ? _pubName : _recName;
         var where = string.Empty;
-        if (!string.IsNullOrEmpty(queryDto.StatusName)) where += " and statusname=@StatusName";
+        if (!string.IsNullOrEmpty(queryDto.StatusName)) where += " AND [StatusName]=@StatusName";
 
-        if (!string.IsNullOrEmpty(queryDto.Name)) where += " and name=@Name";
+        if (!string.IsNullOrEmpty(queryDto.Name)) where += " AND [Name]=@Name";
 
-        if (!string.IsNullOrEmpty(queryDto.Group)) where += " and [group]=@Group";
+        if (!string.IsNullOrEmpty(queryDto.Group)) where += " AND [Group]=@Group";
 
-        if (!string.IsNullOrEmpty(queryDto.Content)) where += " and content like @Content";
+        if (!string.IsNullOrEmpty(queryDto.Content)) where += " AND [Content] LIKE @Content";
 
         var sqlQuery2008 =
-            $@"select * from 
-                (SELECT t.*, ROW_NUMBER() OVER(order by t.Added desc) AS row_number
-                    from {tableName} as t
-                    where 1=1 {where}) as tbl
-                where tbl.row_number between @offset and @offset + @limit";
+            $@"SELECT * FROM (SELECT p.*, ROW_NUMBER() OVER(ORDER BY p.Added DESC) AS RowNum FROM {tableName} as p WHERE 1=1 {where}) as tbl WHERE tbl.RowNum BETWEEN @Offset AND @Offset + @Limit";
 
         var sqlQuery =
-            $"select * from {tableName} where 1=1 {where} order by Added desc offset @Offset rows fetch next @Limit rows only";
+            $"SELECT * FROM {tableName} WHERE 1=1 {where} ORDER BY Added DESC OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY";
 
         object[] sqlParams =
         {
@@ -118,7 +115,7 @@ SELECT
         var connection = new SqlConnection(_options.ConnectionString);
         await using var _ = connection.ConfigureAwait(false);
 
-        var count = await connection.ExecuteScalarAsync<int>($"select count(1) from {tableName} where 1=1 {where}",
+        var count = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(1) FROM {tableName} WHERE 1=1 {where}",
             new SqlParameter("@StatusName", queryDto.StatusName ?? string.Empty),
             new SqlParameter("@Group", queryDto.Group ?? string.Empty),
             new SqlParameter("@Name", queryDto.Name ?? string.Empty),
@@ -251,15 +248,18 @@ select [Key], [Count] from aggr with (nolock) where [Key] >= @minKey and [Key] <
                     var dictionary = new Dictionary<string, int>();
 
                     while (await reader.ReadAsync().ConfigureAwait(false))
+                    {
                         dictionary.Add(reader.GetString(0), reader.GetInt32(1));
+                    }
 
                     return dictionary;
                 }, sqlParams: sqlParams).ConfigureAwait(false);
         }
 
         foreach (var key in keyMaps.Keys)
-            if (!valuesMap.ContainsKey(key))
-                valuesMap.Add(key, 0);
+        {
+            valuesMap.TryAdd(key, 0);
+        }
 
         var result = new Dictionary<DateTime, int>();
         for (var i = 0; i < keyMaps.Count; i++)
@@ -283,6 +283,7 @@ select [Key], [Count] from aggr with (nolock) where [Key] >= @minKey and [Key] <
             MediumMessage? message = null;
 
             while (await reader.ReadAsync().ConfigureAwait(false))
+            {
                 message = new MediumMessage
                 {
                     DbId = reader.GetInt64(0).ToString(),
@@ -292,6 +293,7 @@ select [Key], [Count] from aggr with (nolock) where [Key] >= @minKey and [Key] <
                     ExpiresAt = reader.GetDateTime(3),
                     Retries = reader.GetInt32(4)
                 };
+            }
 
             return message;
         }).ConfigureAwait(false);

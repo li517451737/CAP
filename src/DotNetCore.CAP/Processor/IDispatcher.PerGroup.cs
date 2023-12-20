@@ -27,6 +27,7 @@ internal class DispatcherPerGroup : IDispatcher
     private readonly IMessageSender _sender;
     private readonly IDataStorage _storage;
     private readonly PriorityQueue<MediumMessage, DateTime> _schedulerQueue;
+    private readonly bool _enablePrefetch;
 
     private Channel<MediumMessage> _publishedChannel = default!;
     private ConcurrentDictionary<string, Channel<(MediumMessage, ConsumerExecutorDescriptor?)>> _receivedChannels = default!;
@@ -45,6 +46,7 @@ internal class DispatcherPerGroup : IDispatcher
         _executor = executor;
         _schedulerQueue = new PriorityQueue<MediumMessage, DateTime>();
         _storage = storage;
+        _enablePrefetch = options.Value.EnableConsumerPrefetch;
     }
 
     public async Task Start(CancellationToken stoppingToken)
@@ -53,18 +55,16 @@ internal class DispatcherPerGroup : IDispatcher
         _tasksCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, CancellationToken.None);
         _tasksCts.Token.Register(() => _delayCts.Cancel());
 
-        var capacity = _options.ProducerThreadCount * 500;
         _publishedChannel = Channel.CreateBounded<MediumMessage>(
-            new BoundedChannelOptions(capacity > 5000 ? 5000 : capacity)
+            new BoundedChannelOptions(5000)
             {
                 AllowSynchronousContinuations = true,
-                SingleReader = _options.ProducerThreadCount == 1,
+                SingleReader = true,
                 SingleWriter = true,
                 FullMode = BoundedChannelFullMode.Wait
             });
 
-        await Task.WhenAll(Enumerable.Range(0, _options.ProducerThreadCount)
-            .Select(_ => Task.Run(Sending, _tasksCts.Token)).ToArray());
+        await Task.Run(Sending, _tasksCts.Token).ConfigureAwait(false); //here return Value task
 
         _receivedChannels =
             new ConcurrentDictionary<string, Channel<(MediumMessage, ConsumerExecutorDescriptor?)>>(
@@ -200,13 +200,13 @@ internal class DispatcherPerGroup : IDispatcher
                 });
 
             Task.WhenAll(Enumerable.Range(0, _options.ConsumerThreadCount)
-                .Select(_ => Task.Run(() => Processing(group, channel), _tasksCts!.Token)).ToArray());
+               .Select(_ => Task.Run(() => Processing(group, channel), _tasksCts!.Token)).ToArray());
 
             return channel;
         });
     }
 
-    private async Task Sending()
+    private async ValueTask Sending()
     {
         try
         {
@@ -214,16 +214,16 @@ internal class DispatcherPerGroup : IDispatcher
                 while (_publishedChannel.Reader.TryRead(out var message))
                     try
                     {
-                        var result = await _sender.SendAsync(message).ConfigureAwait(false);
-                        if (!result.Succeeded)
-                            _logger.MessagePublishException(
-                                message.Origin.GetId(),
-                                result.ToString(),
-                                result.Exception);
+                        _ = Task.Run(async () =>
+                        {
+                            var result = await _sender.SendAsync(message).ConfigureAwait(false);
+                            if (!result.Succeeded)
+                                _logger.MessagePublishException(message.Origin.GetId(), result.ToString(), result.Exception);
+                        });
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, $"An exception occurred when sending a message to the MQ. Id:{message.DbId}");
+                        _logger.LogError(ex, $"An exception occurred when sending a message to the broker. Id:{message.DbId}");
                     }
         }
         catch (OperationCanceledException)
@@ -232,7 +232,7 @@ internal class DispatcherPerGroup : IDispatcher
         }
     }
 
-    private async Task Processing(string group, Channel<(MediumMessage, ConsumerExecutorDescriptor?)> channel)
+    private async ValueTask Processing(string group, Channel<(MediumMessage, ConsumerExecutorDescriptor?)> channel)
     {
         try
         {
@@ -240,10 +240,19 @@ internal class DispatcherPerGroup : IDispatcher
                 while (channel.Reader.TryRead(out var message))
                     try
                     {
-                        if (_logger.IsEnabled(LogLevel.Debug))
-                            _logger.LogDebug("Dispatching message for group {ConsumerGroup}", group);
+                        _logger.LogDebug("Dispatching message for group {ConsumerGroup}", group);
 
-                        await _executor.ExecuteAsync(message.Item1, message.Item2, _tasksCts.Token).ConfigureAwait(false);
+                        var item1 = message.Item1;
+                        var item2 = message.Item2;
+
+                        if (_enablePrefetch)
+                        {
+                            _ = Task.Run(() => _executor.ExecuteAsync(item1, item2, _tasksCts.Token).ConfigureAwait(false));
+                        }
+                        else
+                        {
+                            await _executor.ExecuteAsync(item1, item2, _tasksCts.Token).ConfigureAwait(false);
+                        }
                     }
                     catch (OperationCanceledException)
                     {

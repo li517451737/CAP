@@ -24,12 +24,12 @@ public class CapOptions
         FailedRetryCount = 50;
         ConsumerThreadCount = 1;
         EnableConsumerPrefetch = false;
-        ProducerThreadCount = 1;
         Extensions = new List<ICapOptionsExtension>();
         Version = "v1";
         DefaultGroupName = "cap.queue." + Assembly.GetEntryAssembly()?.GetName().Name!.ToLower();
         CollectorCleaningInterval = 300;
         UseDispatchingPerGroup = false;
+        FallbackWindowLookbackSeconds = 240;
     }
 
     internal IList<ICapOptionsExtension> Extensions { get; }
@@ -91,8 +91,7 @@ public class CapOptions
     public int ConsumerThreadCount { get; set; }
 
     /// <summary>
-    /// If true, the message will be pre fetch to memory queue for execute.
-    /// <para>Not available when <see cref="UseDispatchingPerGroup"/> true.</para>
+    /// If true, the message will be prefetch to memory queue for parallel execute by .net thread pool.
     /// Default is false
     /// </summary>
     public bool EnableConsumerPrefetch { get; set; }
@@ -100,16 +99,15 @@ public class CapOptions
     /// <summary>
     /// If true then each message group will have own independent dispatching pipeline. Each pipeline use as many threads as
     /// <see cref="ConsumerThreadCount" /> value is.
-    /// <para>If true, the <see cref="EnableConsumerPrefetch"/> is not available.</para>
     /// Default is false.
     /// </summary>
     public bool UseDispatchingPerGroup { get; set; }
 
     /// <summary>
-    /// The number of producer thread connections.
-    /// Default is 1
+    /// Configure the retry processor to pick up the backtrack time window for Scheduled or Failed status messages.
+    /// Default is 240 seconds.
     /// </summary>
-    public int ProducerThreadCount { get; set; }
+    public int FallbackWindowLookbackSeconds { get; set; }
 
     /// <summary>
     /// The interval of the collector processor deletes expired messages.
@@ -133,7 +131,7 @@ public class CapOptions
     /// <param name="extension"></param>
     public void RegisterExtension(ICapOptionsExtension extension)
     {
-        if (extension == null) throw new ArgumentNullException(nameof(extension));
+        ArgumentNullException.ThrowIfNull(extension);
 
         Extensions.Add(extension);
     }
